@@ -1,0 +1,26 @@
+sequenceDiagram
+    autonumber
+    actor Operador
+    participant Sistema as Sistema de Logistica
+    participant AGV
+    participant Bateria as Monitor de Bateria
+
+    Operador->>Sistema: Solicitar despacho de rota
+    Sistema->>AGV: Consultar disponibilidade
+    AGV-->>Sistema: Informar status
+
+    alt AGV disponivel
+        Sistema->>Bateria: Consultar nivel de bateria
+        Bateria-->>Sistema: Informar percentual atual
+
+        alt Bateria suficiente
+            Sistema->>AGV: Enviar rota
+            AGV-->>Sistema: Confirmar recebimento
+            Sistema-->>Operador: Despacho realizado
+        else Bateria insuficiente
+            Sistema-->>Operador: Despacho bloqueado
+            Sistema->>AGV: Solicitar recarga
+        end
+    else AGV indisponivel
+        Sistema-->>Operador: Informar indisponibilidade
+    end
