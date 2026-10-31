@@ -1,0 +1,23 @@
+
+C4Container
+    title Arquitetura C4 Nivel 2 - Logistica AGVs
+
+    Person(operador, "Operador", "Solicita entregas e acompanha os AGVs")
+
+    System_Boundary(sistema, "Sistema de Logistica AGVs") {
+        Container(interface, "Interface do Operador", "Aplicacao Web", "Permite solicitar e acompanhar entregas")
+        Container(orquestrador, "Orquestrador de AGVs", "Servico", "Coordena os AGVs e as entregas")
+        Container(despacho, "Servico de Despacho", "Servico", "Seleciona AGVs e envia rotas")
+        Container(monitor, "Monitoramento", "Servico", "Consulta disponibilidade e nivel de bateria")
+        ContainerDb(banco, "Banco de Dados", "Banco de dados", "Armazena AGVs, rotas e entregas")
+    }
+
+    System_Ext(agvs, "AGVs", "Veiculos autonomos de transporte")
+
+    Rel(operador, interface, "Solicita entregas")
+    Rel(interface, orquestrador, "Envia solicitacoes")
+    Rel(orquestrador, despacho, "Solicita despacho")
+    Rel(despacho, monitor, "Verifica disponibilidade e bateria")
+    Rel(despacho, agvs, "Envia rota")
+    Rel(monitor, agvs, "Consulta status")
+    Rel(orquestrador, banco, "Consulta e registra entregas")
