@@ -386,7 +386,7 @@ stateDiagram-v2
 
 Fonte (Models-as-Code, C4-PlantUML): [`docs/architecture/workspace.dsl`](docs/architecture/workspace.dsl)
 
-Os conectores explicitam tecnologia e protocolo: REST/HTTPS (JSON), WebSocket (WSS), gRPC (HTTP/2), MQTT 5 (VDA 5050), Kafka, RESP (Redis), JDBC e o protocolo nativo do PostgreSQL.
+A visão mostra apenas os contêineres que participam da funcionalidade; os demais contêineres do sistema (Integração Corporativa, Despacho e Alocação, Provedor de Identidade) foram omitidos para legibilidade. Os conectores explicitam tecnologia e protocolo: REST/HTTPS (JSON), WebSocket (WSS), gRPC (HTTP/2), MQTT 5 (VDA 5050), Kafka, RESP (Redis) e o protocolo nativo do PostgreSQL.
 
 Para gerar a imagem a partir do `.dsl` (conteúdo PlantUML):
 
@@ -394,85 +394,67 @@ Para gerar a imagem a partir do `.dsl` (conteúdo PlantUML):
 plantuml -tsvg docs/architecture/workspace.dsl
 ```
 
-Visualização renderizada no GitHub (o mesmo modelo, transcrito para o C4 do Mermaid):
+Visualização renderizada no GitHub: o mesmo modelo transcrito para Mermaid, usando `flowchart` com a notação visual do C4 (pessoas em azul-escuro, contêineres em azul, sistemas externos em cinza, fronteira tracejada). O `flowchart` foi escolhido no lugar do `C4Container` do Mermaid, que é experimental e não roteia as conexões, gerando sobreposição de linhas e textos.
 
 ```mermaid
-C4Container
-    title C4 Nível 2 (Contêineres) - Orquestração de AGVs | Foco: Reserva de Rota e Resolução de Conflitos em Corredores
+---
+title: C4 Nível 2 (Contêineres) - Foco Reserva de Rota e Resolução de Conflitos em Corredores
+---
+flowchart TB
+    supervisor(["<b>Supervisor de Operações</b><br/>[Pessoa]<br/>Define prioridades e acompanha conflitos"])
+    operador(["<b>Operador Logístico</b><br/>[Pessoa]<br/>Monitora reservas e conflitos"])
 
-    Person(supervisor, "Supervisor de Operações", "Define políticas de prioridade entre missões e acompanha indicadores de conflitos")
-    Person(operador, "Operador Logístico", "Monitora missões, reservas de rota ativas e conflitos em corredores")
+    subgraph orq["Sistema de Orquestração de Entregas Autônomas [Software System]"]
+        web["<b>Portal de Operações</b><br/>[Container: React 18 / TypeScript]<br/>Mapa de corredores, reservas e alertas"]
+        api["<b>API Gateway / BFF</b><br/>[Container: Node.js 20 / NestJS]<br/>Entrada única e push em tempo real"]
+        alertas["<b>Serviço de Alertas</b><br/>[Container: Node.js 20]<br/>Alertas de conflito e bloqueio"]
+        missoes["<b>Serviço de Missões</b><br/>[Container: Java 21 / Spring Boot 3]<br/>Solicita, ativa e libera a ReservaRota"]
+        roteamento["<b>Serviço de Reserva de Rota</b><br/>[Container: Python 3.12 / FastAPI]<br/>Reserva trechos, resolve conflitos<br/>e libera trechos percorridos"]
+        telemetria["<b>Serviço de Telemetria</b><br/>[Container: Go 1.22]<br/>Posição em tempo real e bloqueios"]
+        gatewayFrota["<b>Gateway da Frota AGV</b><br/>[Container: Go 1.22]<br/>Traduz comandos para VDA 5050"]
+        broker[["<b>Barramento de Eventos</b><br/>[Container: Apache Kafka 3.7]<br/>RotaReservada, ConflitoDetectado,<br/>TrechoLiberado, PosicaoAtualizada"]]
+        mqtt[["<b>Broker MQTT</b><br/>[Container: Eclipse Mosquitto 2]<br/>Tópicos VDA 5050 e posições RTLS"]]
+        cache[("<b>Locks de Trechos</b><br/>[Container: Redis 7]<br/>Locks atômicos SET NX PX + Lua")]
+        dbOper[("<b>Banco Operacional</b><br/>[Container: PostgreSQL 16]<br/>Schema rotas: reservas e conflitos")]
+        dbHist[("<b>Banco de Rastreabilidade</b><br/>[Container: TimescaleDB 2.14]<br/>Histórico de posições e conflitos")]
+    end
 
-    System_Ext(corporativo, "Sistema Corporativo (ERP/WMS)", "Origina solicitações de transporte e recebe a notificação de conclusão")
-    System_Ext(frota, "Frota AGV", "Veículos autônomos compatíveis com VDA 5050 que percorrem os trechos reservados")
-    System_Ext(rtls, "Infraestrutura de Localização (RTLS)", "Fornece posição em tempo real e ocupação dos corredores do parque industrial")
+    rtls["<b>Infraestrutura RTLS</b><br/>[Sistema Externo]<br/>Posição e ocupação dos corredores"]
+    frota["<b>Frota AGV</b><br/>[Sistema Externo]<br/>AGVs compatíveis com VDA 5050"]
 
-    System_Boundary(orq, "Sistema de Orquestração de Entregas Autônomas") {
-        Container(web, "Portal de Operações", "React 18 / TypeScript (SPA)", "Mapa de corredores, reservas de rota ativas, conflitos e alertas")
-        Container(api, "API Gateway / BFF", "Node.js 20 / NestJS", "Ponto único de entrada: validação de tokens, autorização por perfil e push de atualizações em tempo real")
-        Container(idp, "Provedor de Identidade", "Keycloak 25", "Autenticação OIDC/OAuth 2.0 e perfis Supervisor/Operador")
-        Container(integracao, "Serviço de Integração Corporativa", "Java 21 / Spring Boot 3", "Recebe solicitações do Sistema Corporativo e notifica a origem na conclusão (webhooks)")
+    supervisor -->|"Define prioridades<br/>[HTTPS]"| web
+    operador -->|"Monitora reservas<br/>[HTTPS]"| web
+    web -->|"API e tempo real<br/>[REST/HTTPS + WSS]"| api
+    api -->|"Consulta reservas e conflitos<br/>[REST/HTTP JSON]"| roteamento
+    alertas -->|"Envia alertas<br/>[gRPC streaming]"| api
 
-        Container(missoes, "Serviço de Missões", "Java 21 / Spring Boot 3", "Planeja e executa missões; solicita, ativa e libera a ReservaRota de cada missão")
-        Container(despacho, "Serviço de Despacho e Alocação", "Java 21 / Spring Boot 3", "Aloca o AGV à missão e redistribui missões em caso de falha")
-        Container(roteamento, "Serviço de Reserva de Rota", "Python 3.12 / FastAPI", "Calcula a rota, reserva trechos com lock distribuído, detecta e resolve conflitos em corredores (rota alternativa, espera ou preempção por prioridade) e libera trechos percorridos")
-        Container(telemetria, "Serviço de Rastreamento e Telemetria", "Go 1.22", "Consome posições do RTLS, detecta bloqueios/obstáculos em corredores e calcula indicadores")
-        Container(alertas, "Serviço de Alertas e Notificações", "Node.js 20", "Emite alertas operacionais (conflito em corredor, bloqueio de rota, reserva expirada)")
-        Container(gatewayFrota, "Gateway da Frota AGV", "Go 1.22", "Traduz rotas e comandos (enviar rota, pausar) para VDA 5050 e converte status dos AGVs em eventos")
+    missoes -->|"reservarRota / ativarReserva /<br/>liberarReserva<br/>[REST/HTTP JSON]"| roteamento
+    missoes -->|"enviarRota<br/>[gRPC HTTP/2]"| gatewayFrota
 
-        ContainerQueue(mqtt, "Broker MQTT", "Eclipse Mosquitto 2", "Tópicos VDA 5050 (order, instantActions, state) e tópicos de posição do RTLS")
-        ContainerQueue(broker, "Barramento de Eventos", "Apache Kafka 3.7", "Eventos: RotaReservada, ConflitoDetectado, TrechoLiberado, ReservaLiberada, PosicaoAtualizada, BloqueioCorredor")
-        ContainerDb(dbOper, "Banco Operacional", "PostgreSQL 16", "Schemas por serviço: missoes, frota e rotas (reservas_rota, trechos_reservados, conflitos)")
-        ContainerDb(dbHist, "Banco de Rastreabilidade", "TimescaleDB 2.14 (PostgreSQL 16)", "Histórico de posições, conflitos resolvidos e indicadores")
-        ContainerDb(cache, "Locks de Trechos e Estado", "Redis 7", "Locks atômicos por trecho/janela de tempo (SET NX PX + Lua) e posição atual dos AGVs")
-    }
+    roteamento -->|"consultarOcupacao<br/>[REST/HTTPS JSON]"| rtls
+    roteamento -->|"adquirir / transferir / liberar locks<br/>[RESP TCP]"| cache
+    roteamento -->|"Persiste ReservaRota<br/>[PostgreSQL wire / psycopg 3]"| dbOper
+    roteamento -->|"Rota recalculada / pausarAgv<br/>[gRPC HTTP/2]"| gatewayFrota
+    roteamento -->|"Publica eventos de reserva<br/>[Kafka]"| broker
 
-    Rel(supervisor, web, "Define prioridades e consulta indicadores de conflito", "HTTPS")
-    Rel(operador, web, "Monitora reservas, conflitos e missões", "HTTPS")
-    Rel(web, idp, "Autentica usuário", "OIDC / HTTPS")
-    Rel(web, api, "Chamadas de API e atualizações em tempo real", "REST/HTTPS (JSON) + WebSocket (WSS)")
-    Rel(api, idp, "Valida tokens JWT", "OIDC / HTTPS")
+    telemetria -->|"recalcularRota<br/>[gRPC HTTP/2]"| roteamento
+    telemetria -->|"Publica PosicaoAtualizada<br/>[Kafka]"| broker
+    telemetria -->|"Grava histórico<br/>[PostgreSQL wire / pgx]"| dbHist
+    broker -->|"PosicaoAtualizada<br/>[Kafka]"| roteamento
+    broker -->|"ConflitoDetectado<br/>[Kafka]"| alertas
 
-    Rel(corporativo, integracao, "Envia solicitação de transporte", "REST/HTTPS (JSON)")
-    Rel(integracao, corporativo, "Notifica conclusão da missão", "Webhook HTTPS (JSON)")
-    Rel(integracao, missoes, "Registra solicitação", "REST/HTTP (JSON)")
+    gatewayFrota <-->|"order / state<br/>[MQTT 5 - VDA 5050]"| mqtt
+    mqtt <-->|"order / state<br/>[MQTT 5 - VDA 5050]"| frota
+    rtls -->|"Publica posições<br/>[MQTT 5]"| mqtt
+    mqtt -->|"Posições<br/>[MQTT 5]"| telemetria
 
-    Rel(api, missoes, "Comandos de missão", "REST/HTTP (JSON)")
-    Rel(api, roteamento, "Consulta reservas e conflitos ativos", "REST/HTTP (JSON)")
-    Rel(api, telemetria, "Consulta posição, histórico e indicadores", "REST/HTTP (JSON)")
-
-    Rel(missoes, despacho, "Solicita alocação de AGV", "REST/HTTP (JSON)")
-    Rel(missoes, roteamento, "reservarRota / ativarReserva / liberarReserva", "REST/HTTP (JSON)")
-    Rel(missoes, gatewayFrota, "Envia rota reservada ao AGV", "gRPC (HTTP/2)")
-    Rel(missoes, dbOper, "Lê e grava missões", "JDBC")
-    Rel(despacho, dbOper, "Lê e grava frota e alocações", "JDBC")
-
-    Rel(roteamento, rtls, "Consulta ocupação dos corredores", "REST/HTTPS (JSON)")
-    Rel(roteamento, cache, "Adquire, transfere e libera locks de trechos", "RESP (TCP)")
-    Rel(roteamento, dbOper, "Persiste ReservaRota e conflitos", "PostgreSQL wire protocol (psycopg 3)")
-    Rel(roteamento, gatewayFrota, "Envia rota recalculada / pausa AGV preemptado", "gRPC (HTTP/2)")
-
-    BiRel(gatewayFrota, mqtt, "Publica order/instantActions, assina state", "MQTT 5 (VDA 5050)")
-    BiRel(frota, mqtt, "Publica state, assina order", "MQTT 5 (VDA 5050)")
-    Rel(rtls, mqtt, "Publica posições dos AGVs", "MQTT 5")
-    Rel(telemetria, mqtt, "Assina posições do RTLS", "MQTT 5")
-
-    Rel(telemetria, cache, "Atualiza posição atual", "RESP (TCP)")
-    Rel(telemetria, dbHist, "Grava histórico e indicadores", "PostgreSQL wire protocol (pgx)")
-    Rel(telemetria, roteamento, "recalcularRota (bloqueio/obstáculo)", "gRPC (HTTP/2)")
-    Rel(telemetria, api, "Push de posição em tempo real", "gRPC server streaming")
-
-    Rel(roteamento, broker, "Publica RotaReservada, ConflitoDetectado, TrechoLiberado, ReservaLiberada", "Kafka protocol (TCP)")
-    Rel(telemetria, broker, "Publica PosicaoAtualizada, BloqueioCorredor", "Kafka protocol (TCP)")
-    Rel(gatewayFrota, broker, "Publica eventos da frota", "Kafka protocol (TCP)")
-    Rel(broker, roteamento, "Consome PosicaoAtualizada (libera trechos percorridos)", "Kafka protocol (TCP)")
-    Rel(broker, alertas, "Consome ConflitoDetectado, BloqueioCorredor", "Kafka protocol (TCP)")
-    Rel(broker, telemetria, "Consome ConflitoDetectado (histórico)", "Kafka protocol (TCP)")
-    Rel(broker, despacho, "Consome falhas de AGV", "Kafka protocol (TCP)")
-    Rel(broker, integracao, "Consome MissaoConcluida", "Kafka protocol (TCP)")
-    Rel(alertas, api, "Envia alertas ao portal", "gRPC server streaming")
-
-    UpdateLayoutConfig($c4ShapeInRow="4", $c4BoundaryInRow="1")
+    classDef person fill:#08427b,stroke:#052e56,color:#fff
+    classDef container fill:#438dd5,stroke:#2e6295,color:#fff
+    classDef ext fill:#999999,stroke:#6b6b6b,color:#fff
+    class supervisor,operador person
+    class web,api,alertas,missoes,roteamento,telemetria,gatewayFrota,broker,mqtt,cache,dbOper,dbHist container
+    class rtls,frota ext
+    style orq fill:none,stroke:#444,stroke-dasharray:6 4
 ```
 
 ---
