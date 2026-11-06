@@ -1,1 +1,69 @@
-%% Máquina de estados — MissaoTransporte
+%% Estados da MissaoTransporte
+
+stateDiagram-v2
+    direction TB
+
+    [*] --> Criada : criarMissao() ou criarMissaoSubstituta()
+    Criada --> AguardandoAtribuicao : publicar [dados de coleta e destino válidos] / enfileirarParaSelecao()
+    Criada --> Cancelada : cancelar / registrarAuditoria()
+
+    state AguardandoAtribuicao {
+        state origemCarga <<choice>>
+        state "ProntaParaDespacho" as ProntaParaDespacho
+        ProntaParaDespacho : entry / selecionarCandidatos()
+        [*] --> origemCarga
+        origemCarga --> BloqueadaPorCarga : [missaoOrigem.cargaEmbarcada]
+        origemCarga --> ProntaParaDespacho : [sem carga embarcada na origem]
+        BloqueadaPorCarga --> ProntaParaDespacho : cargaLiberada [operador confirmou] / confirmarRecuperacaoCarga()
+        ProntaParaDespacho --> SemCandidato : reservaVazia / notificarOperador()
+        SemCandidato --> ProntaParaDespacho : reavaliar [após 60 s]
+    }
+
+    AguardandoAtribuicao --> Atribuida : agvReservado [reservarSeDisponivel() = true] / atribuirAGV()
+    AguardandoAtribuicao --> Cancelada : cancelar / registrarAuditoria()
+
+    state "Atribuida" as Atribuida
+    Atribuida : entry / enviarOrdemMissao()
+    Atribuida : do / aguardar aceite (30 s)
+    Atribuida --> EmExecucao : aceiteRecebido [comandoId válido] / confirmarReserva()
+    Atribuida --> AguardandoAtribuicao : recusa ou timeoutAceite / liberarAtribuicao(), liberarReserva()
+
+    state EmExecucao {
+        [*] --> DeslocandoParaColeta
+        DeslocandoParaColeta --> Carregando : chegouNaColeta
+        Carregando --> EmTransporte : cargaEmbarcada / marcarCargaEmbarcada()
+        EmTransporte --> Descarregando : chegouNoDestino
+        Descarregando --> [*] : cargaEntregue
+    }
+
+    EmExecucao --> Concluida : entregaConfirmada / registrarAuditoria()
+    EmExecucao --> Interrompida : interrupcaoSuspeita [evento novo] / interromperMissao()
+
+    state "Interrompida" as Interrompida
+    Interrompida : entry / suspender comandos ao AGV
+    Interrompida : do / solicitarStatus() até 3 vezes
+    Interrompida --> EmExecucao : agvRecuperado [mesmo AGV e sem falha] / retomarMissao()
+    Interrompida --> Falha : falhaConfirmada [3 tentativas sem resposta ou codigoFalha] / registrarFalha()
+    Interrompida --> Cancelada : cancelar [operador] / registrarAuditoria()
+
+    state "Falha" as Falha
+    Falha : entry / liberar AGV original da responsabilidade
+    Falha : exit / avaliarPolitica() e criarMissaoSubstituta()
+
+    Concluida --> [*]
+    Cancelada --> [*]
+    Falha --> [*]
+
+    note right of Falha
+        Estado final da missão original.
+        Não existe transição de Falha para EmExecucao.
+        A entrega continua numa missão nova
+        com id próprio e missaoOrigemId apontando para esta.
+    end note
+
+    note left of Atribuida
+        Toda transição grava com lock otimista
+        (salvar com versaoEsperada).
+        Evento fora de ordem ou de um estado
+        que não aceita ele é rejeitado.
+    end note
