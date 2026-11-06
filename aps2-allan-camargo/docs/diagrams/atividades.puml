@@ -1,1 +1,155 @@
-' Diagrama de atividades com raias — Redistribuição de missão
+' Atividades da redistribuicao de missao por falha de AGV
+@startuml
+!pragma layout smetana
+skinparam defaultFontSize 12
+skinparam swimlaneWidth 260
+
+title Redistribuição de missão por falha de AGV
+
+|AGV / Comunicação|
+|Monitoramento e Detecção|
+|Gestão de Missões|
+|Operador|
+
+|AGV / Comunicação|
+start
+repeat
+  :Publicar telemetria a cada 2 s
+  <size:10>MQTT, QoS 1</size>;
+  |Monitoramento e Detecção|
+  :Atualizar heartbeat e estado do AGV
+  <size:10>onTelemetria() / verificarHeartbeats()</size>;
+repeat while ([AGV reportou falha] ou [sem heartbeat há mais de 6 s]?) is ([não]) not ([sim])
+
+:Publicar InterrupcaoSuspeita;
+
+fork
+  |Gestão de Missões|
+  if (evento já registrado?\n<size:10>registrarSeNovo()</size>) then ([sim])
+    :Descartar evento duplicado;
+  else ([não])
+    :Interromper missão original
+    EmExecucao → Interrompida
+    <size:10>interromperMissao()</size>;
+  endif
+fork again
+  |Monitoramento e Detecção|
+  repeat
+    :Solicitar status do AGV (timeout 2 s)
+    <size:10>solicitarStatus()</size>;
+    |AGV / Comunicação|
+    :Encaminhar pedido de status via MQTT;
+    |Monitoramento e Detecção|
+  repeat while ([sem resposta] e [tentativas < 3]?) is ([sim]) not ([não])
+end fork
+
+|Monitoramento e Detecção|
+if (AGV respondeu operacional e sem falha?) then ([sim])
+  |Gestão de Missões|
+  :Retomar missão com o mesmo AGV
+  Interrompida → EmExecucao
+  <size:10>retomarMissao()</size>;
+  stop
+else ([não])
+  :Confirmar falha e publicar FalhaConfirmada;
+endif
+
+|Gestão de Missões|
+:Registrar falha da missão original
+Interrompida → Falha
+<size:10>registrarFalha()</size>;
+:Avaliar política de redistribuição
+<size:10>avaliarPolitica()</size>;
+
+if (redistribuição permitida?) then ([não])
+  :Registrar resultado na auditoria
+  <size:10>registrarAuditoria()</size>;
+  |Operador|
+  :Receber alerta de tratamento manual;
+  stop
+else ([sim])
+endif
+
+|Gestão de Missões|
+:Criar missão substituta vinculada à original
+estado AguardandoAtribuicao
+<size:10>criarMissaoSubstituta()</size>;
+
+if (carga embarcada no AGV original?) then ([sim])
+  |Operador|
+  :Recuperar ou transferir a carga com segurança
+  e confirmar no painel
+  <size:10>confirmarRecuperacaoCarga()</size>;
+  |Gestão de Missões|
+  :Liberar missão substituta para despacho;
+else ([não])
+endif
+
+repeat
+  |Monitoramento e Detecção|
+  :Listar AGVs disponíveis e sem falha ativa
+  <size:10>listarAGVsAptos()</size>;
+  |Gestão de Missões|
+  fork
+    :Calcular rota de cada candidato
+    até a coleta e o destino
+    <size:10>calcularRota()</size>;
+  fork again
+    :Verificar bateria e capacidade
+    de carga de cada candidato;
+  end fork
+  :Descartar inaptos e ordenar por ETA
+  <size:10>selecionarCandidatos()</size>;
+
+  :Reservar o primeiro candidato ainda DISPONIVEL
+  com UPDATE condicional
+  <size:10>reservarAGV() / reservarSeDisponivel()</size>;
+
+  if (reserva obtida?) then ([não])
+    :Manter substituta em AguardandoAtribuicao
+    e agendar reavaliação em 60 s;
+    |Operador|
+    :Receber alerta de falta de AGV substituto;
+    stop
+  else ([sim])
+  endif
+
+  |Gestão de Missões|
+  :Atribuir AGV à substituta
+  AguardandoAtribuicao → Atribuida
+  <size:10>atribuirAGV()</size>;
+
+  |AGV / Comunicação|
+  repeat
+    :Enviar ordem de missão ao AGV substituto
+    <size:10>enviarOrdemMissao(), MQTT QoS 1</size>;
+  repeat while ([erro de comunicação] e [reenvios < 3]?) is ([sim]) not ([não])
+  :Aguardar aceite do AGV (até 30 s);
+
+  |Gestão de Missões|
+  if (aceite recebido em até 30 s?) then ([sim])
+    :Confirmar aceite e reserva
+    Atribuida → EmExecucao
+    <size:10>confirmarAceite() / confirmarReserva()</size>;
+  else ([não])
+    :Liberar atribuição e reserva
+    Atribuida → AguardandoAtribuicao
+    <size:10>liberarAtribuicao() / liberarReserva()</size>;
+  endif
+repeat while ([substituta sem aceite] e [tentativas < 3]?) is ([sim]) not ([não])
+
+fork
+  :Registrar resultado na auditoria
+  sucesso: M-100 → S-101, AGV-07 → AGV-12
+  sem aceite: S-101 para tratamento manual
+  <size:10>registrarAuditoria()</size>;
+fork again
+  |Operador|
+  :Receber resultado no painel
+  confirmação do despacho ou alerta
+  <size:10>notificarOperador(), WebSocket</size>;
+end fork
+
+|Gestão de Missões|
+stop
+@enduml
