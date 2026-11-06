@@ -1,0 +1,98 @@
+sequenceDiagram
+    title Diagrama de Sequência - Gestão de Reserva de Rota e Resolução de Conflitos em Corredores
+    autonumber
+
+    participant MIS as ServicoMissoes
+    participant ROT as ServicoReservaRota
+    participant RES as ResolvedorConflitos
+    participant RTLS as RtlsClient
+    participant LCK as TrechoLockStore (Redis)
+    participant REP as ReservaRotaRepository (PostgreSQL)
+    participant KFK as Barramento de Eventos (Kafka)
+    participant GW as GatewayFrota
+    participant AGV as Frota AGV
+    participant TEL as ServicoTelemetria
+    participant ALE as ServicoAlertas
+
+    Note over MIS,ALE: ->> chamada síncrona bloqueante | -) mensagem assíncrona | -->> retorno (DTO)
+
+    %% 1. Solicitação e cálculo da rota
+    MIS->>ROT: reservarRota(SolicitacaoReservaDTO{missaoId, agvId, origem, destino, prioridade})
+    activate ROT
+    ROT->>RTLS: consultarOcupacao(corredorIds)
+    RTLS-->>ROT: OcupacaoCorredoresDTO{corredores[], ocupacao[]}
+    ROT->>ROT: calcularRota(origem, destino, OcupacaoCorredoresDTO)
+    ROT->>REP: salvar(ReservaRota{status=PENDENTE, trechos[], janelas[]})
+    REP-->>ROT: ReservaRotaDTO{reservaId, status=PENDENTE}
+
+    %% 2. Reserva atômica dos trechos (proteção contra reserva dupla)
+    ROT->>LCK: adquirirLocks(trechos[], agvId, janelas[])
+    LCK-->>ROT: ResultadoLockDTO{sucesso, trechosEmConflito[], reservasConflitantes[]}
+
+    alt [sucesso == true] Sem conflito
+        ROT->>REP: atualizarStatus(reservaId, CONFIRMADA)
+        ROT-)KFK: publicar(RotaReservadaEvent{reservaId, agvId, trechos[]})
+        ROT-->>MIS: ReservaRotaDTO{reservaId, status=CONFIRMADA, rota}
+    else [sucesso == false] Conflito em corredor
+        ROT-)KFK: publicar(ConflitoDetectadoEvent{reservaId, trechosEmConflito[]})
+        KFK-)ALE: onConflitoDetectado(ConflitoDetectadoEvent)
+        ROT->>RES: resolverConflito(ConflitoDTO{reserva, reservasConflitantes[], prioridades[]})
+        RES-->>ROT: DecisaoConflitoDTO{estrategia, reservaPerdedoraId}
+
+        alt [estrategia == ROTA_ALTERNATIVA]
+            ROT->>ROT: calcularRota(origem, destino, OcupacaoCorredoresDTO, excluir=trechosEmConflito)
+            ROT->>LCK: adquirirLocks(trechosAlternativos[], agvId, janelas[])
+            LCK-->>ROT: ResultadoLockDTO{sucesso=true}
+            ROT->>REP: atualizarStatus(reservaId, CONFIRMADA)
+            ROT-->>MIS: ReservaRotaDTO{reservaId, status=CONFIRMADA, rotaAlternativa}
+        else [estrategia == PREEMPCAO] prioridade da nova missão é maior
+            ROT->>GW: pausarAgv(agvConflitanteId)
+            GW-)AGV: instantAction(stopPause) via MQTT (VDA 5050)
+            GW-->>ROT: ConfirmacaoComandoDTO{aceito=true}
+            ROT->>LCK: transferirLocks(trechosEmConflito[], agvConflitanteId, agvId)
+            LCK-->>ROT: ResultadoLockDTO{sucesso=true}
+            ROT->>REP: atualizarStatus(reservaPerdedoraId, SUSPENSA)
+            ROT->>REP: atualizarStatus(reservaId, CONFIRMADA)
+            ROT-->>MIS: ReservaRotaDTO{reservaId, status=CONFIRMADA, rota}
+        else [estrategia == AGUARDAR_JANELA]
+            ROT->>REP: atualizarStatus(reservaId, EM_ESPERA)
+            ROT-->>MIS: ReservaRotaDTO{reservaId, status=EM_ESPERA, previsaoLiberacao}
+        end
+    end
+    deactivate ROT
+
+    %% 3. Envio da rota e ativação da reserva
+    opt [status == CONFIRMADA]
+        MIS->>GW: enviarRota(agvId, RotaDTO)
+        GW-)AGV: order(nodes, edges) via MQTT (VDA 5050)
+        GW-->>MIS: ConfirmacaoComandoDTO{aceito=true}
+        MIS->>ROT: ativarReserva(reservaId)
+        ROT->>REP: atualizarStatus(reservaId, ATIVA)
+        ROT-->>MIS: ReservaRotaDTO{reservaId, status=ATIVA}
+
+        %% 4. Sincronização com a telemetria durante o trajeto
+        loop [reserva.status == ATIVA] A cada posição recebida
+            RTLS-)TEL: onPosicao(PosicaoDTO{agvId, x, y, corredorId})
+            TEL-)KFK: publicar(PosicaoAtualizadaEvent{agvId, trechoAtual})
+            KFK-)ROT: onPosicaoAtualizada(PosicaoAtualizadaEvent)
+            ROT->>LCK: liberarLock(trechoPercorrido, agvId)
+            ROT-)KFK: publicar(TrechoLiberadoEvent{reservaId, trechoId})
+
+            opt [bloqueioDetectado == true] Obstáculo no corredor
+                TEL->>ROT: recalcularRota(reservaId, BloqueioDTO{corredorId, motivo})
+                ROT->>LCK: adquirirLocks(novosTrechos[], agvId, janelas[])
+                LCK-->>ROT: ResultadoLockDTO{sucesso=true}
+                ROT->>GW: enviarRota(agvId, RotaDTO)
+                GW-)AGV: order(nodes, edges) via MQTT (VDA 5050)
+                GW-->>ROT: ConfirmacaoComandoDTO{aceito=true}
+                ROT-->>TEL: ReservaRotaDTO{reservaId, status=ATIVA, rota}
+            end
+        end
+
+        %% 5. Conclusão e liberação da reserva
+        MIS->>ROT: liberarReserva(reservaId)
+        ROT->>LCK: liberarLocks(reservaId)
+        ROT->>REP: atualizarStatus(reservaId, CONCLUIDA)
+        ROT-)KFK: publicar(ReservaLiberadaEvent{reservaId})
+        ROT-->>MIS: ReservaRotaDTO{reservaId, status=CONCLUIDA}
+    end
