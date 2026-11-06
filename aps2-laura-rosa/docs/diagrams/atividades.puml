@@ -1,0 +1,107 @@
+@startuml atividades
+' Artefato 2 — Diagrama de Atividades com Raias (versão PlantUML, raias estritas)
+' Funcionalidade: Recepção de Solicitação via ERP/WMS/MES e Planejamento da Missão
+' Equivalente semântico de atividades.mmd (mesmas ações, guardas, forks e joins)
+skinparam defaultFontName Arial
+skinparam shadowing false
+skinparam ActivityBackgroundColor #EEF2FF
+skinparam ActivityBorderColor #4F46E5
+skinparam ActivityDiamondBackgroundColor #FFF4D6
+skinparam ActivityDiamondBorderColor #B8860B
+skinparam SwimlaneTitleFontStyle bold
+title Recepção de Solicitação via ERP/WMS/MES e Planejamento da Missão
+
+|#F8FAFC|ERP / WMS / MES\n(Sistema corporativo)|
+start
+:Gerar ordem de movimentação de material;
+:Enviar solicitação (POST + token OAuth 2.0 + HMAC);
+
+|#EEF6FF|Integração Empresarial\n(Controller, ACL, SolicitacaoService)|
+:Autenticar requisição;
+if (Requisição autenticada?) then ([token.valido == false OU hmac.valido == false])
+  :Responder 401 Unauthorized;
+  |ERP / WMS / MES\n(Sistema corporativo)|
+  :Registrar erro de integração;
+  stop
+else ([token.valido == true E hmac.valido == true])
+endif
+
+|Integração Empresarial\n(Controller, ACL, SolicitacaoService)|
+:Traduzir payload para o modelo de domínio (ACL);
+if (Payload válido?) then ([violacoes.size > 0])
+  :Responder 422 com violações;
+  |ERP / WMS / MES\n(Sistema corporativo)|
+  :Corrigir dados e reenviar;
+  stop
+else ([violacoes.size == 0])
+endif
+
+|Integração Empresarial\n(Controller, ACL, SolicitacaoService)|
+if (Solicitação já registrada?) then ([idExterno já existe])
+  :Responder 200 com protocolo existente;
+  |ERP / WMS / MES\n(Sistema corporativo)|
+  :Manter protocolo já registrado;
+  stop
+else ([idExterno inédito])
+endif
+
+|Integração Empresarial\n(Controller, ACL, SolicitacaoService)|
+:Persistir solicitação RECEBIDA + outbox (mesma transação);
+:Responder 202 Accepted com protocolo;
+
+fork
+  |ERP / WMS / MES\n(Sistema corporativo)|
+  :Registrar protocolo e aguardar callback;
+fork again
+  |Integração Empresarial\n(Controller, ACL, SolicitacaoService)|
+  :Publicar SolicitacaoRecebida (outbox → AMQP);
+end fork
+
+|#F0FDF4|Planejamento da Solicitação\n(PlanejamentoService, Priorização)|
+repeat
+  :Mudar solicitação para EM_ANALISE;
+  fork
+    |#FFF7ED|Serviços de Apoio\n(Geolocalização, Frota)|
+    :Validar hubs de origem e destino;
+  fork again
+    |Serviços de Apoio\n(Geolocalização, Frota)|
+    :Verificar compatibilidade da frota (material e peso);
+  fork again
+    |Serviços de Apoio\n(Geolocalização, Frota)|
+    :Calcular rota preliminar;
+  end fork
+  |Planejamento da Solicitação\n(PlanejamentoService, Priorização)|
+  :Consolidar análise (inclui viabilidade do prazo);
+  backward :Mudar para PENDENTE_ROTA e aguardar backoff;
+repeat while (Reprocessar?) is ([erros.size == 0 E rota.valida == false E tentativasRota < 5]) not ([senão])
+
+if (Solicitação aprovada?) then ([erros.size > 0 OU rota.valida == false])
+  :Mudar solicitação para REJEITADA;
+  |Integração Empresarial\n(Controller, ACL, SolicitacaoService)|
+  :Notificar ERP: REJEITADA com motivos (webhook);
+  |ERP / WMS / MES\n(Sistema corporativo)|
+  :Tratar rejeição da ordem;
+  stop
+else ([erros.size == 0 E rota.valida == true])
+  |Planejamento da Solicitação\n(PlanejamentoService, Priorização)|
+  :Calcular prioridade (Política de Priorização);
+  :Mudar solicitação para PRIORIZADA;
+endif
+
+|#FDF2F8|Orquestração de Missões\n(MissaoService)|
+:Criar MissaoTransporte PLANEJADA;
+
+|Planejamento da Solicitação\n(PlanejamentoService, Priorização)|
+:Vincular missão e mudar para EM_ATENDIMENTO;
+
+fork
+  |Orquestração de Missões\n(MissaoService)|
+  :Enfileirar missão para alocação de AGV;
+fork again
+  |Integração Empresarial\n(Controller, ACL, SolicitacaoService)|
+  :Notificar ERP: ACEITA com missaoId (webhook);
+  |ERP / WMS / MES\n(Sistema corporativo)|
+  :Atualizar ordem com missaoId e ETA;
+end fork
+stop
+@enduml

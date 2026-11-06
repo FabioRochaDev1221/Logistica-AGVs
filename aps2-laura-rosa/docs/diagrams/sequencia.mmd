@@ -1,0 +1,87 @@
+%% Artefato 1 — Diagrama de Sequência
+%% Funcionalidade: Recepção de Solicitação via ERP/WMS/MES e Planejamento da Missão
+%% Contexto: Integração Empresarial e Solicitação de Transporte · Entidade: SolicitacaoTransporte
+%% Convenção: ->> chamada síncrona bloqueante | -) mensagem assíncrona | -->> retorno (DTO)
+sequenceDiagram
+    autonumber
+    participant ERP as ERP / WMS / MES<br/>«Sistema externo»
+    participant CTL as IntegracaoController<br/>«REST»
+    participant ACL as TradutorSolicitacaoACL<br/>«Anti-Corruption Layer»
+    participant SVC as SolicitacaoService
+    participant REP as SolicitacaoRepository<br/>«PostgreSQL»
+    participant PLN as PlanejamentoService<br/>«consumidor AMQP»
+    participant GEO as GeolocalizacaoService<br/>«gRPC»
+    participant FRT as FrotaService<br/>«gRPC»
+    participant PRI as PoliticaPriorizacao<br/>«Strategy»
+    participant MIS as MissaoService<br/>«Orquestração · gRPC»
+    participant NTF as ErpNotifier<br/>«Webhook»
+
+    ERP->>CTL: receberSolicitacao(SolicitacaoExternaDTO) [POST /api/v1/integracao/solicitacoes]
+    CTL->>ACL: traduzir(SolicitacaoExternaDTO)
+    ACL-->>CTL: ResultadoTraducaoDTO {comando, violacoes}
+
+    alt violacoes.size > 0 (schema ou código de hub desconhecido)
+        CTL-->>ERP: 422 Unprocessable Entity — ErroValidacaoDTO {violacoes}
+    else violacoes.size == 0
+        CTL->>SVC: registrar(ComandoCriarSolicitacao)
+        SVC->>REP: buscarPorIdExterno(sistemaOrigem, idExterno)
+        REP-->>SVC: Optional~SolicitacaoTransporte~
+
+        alt solicitação já registrada (reenvio do ERP)
+            SVC-->>CTL: ProtocoloDTO {protocolo existente, status atual, duplicada: true}
+            CTL-->>ERP: 200 OK — ProtocoloDTO
+        else idExterno inédito
+            SVC->>REP: salvar(SolicitacaoTransporte {status: RECEBIDA} + outbox SolicitacaoRecebida)
+            REP-->>SVC: SolicitacaoTransporte {id, versao: 0}
+            SVC-->>CTL: ProtocoloDTO {protocolo, status: RECEBIDA}
+            CTL-->>ERP: 202 Accepted — ProtocoloDTO
+
+            SVC-)PLN: processar(SolicitacaoRecebidaEvent) [AMQP fila solicitacoes.recebidas, via outbox]
+            PLN->>REP: atualizarStatus(id, EM_ANALISE, versao 0)
+            REP-->>PLN: SolicitacaoTransporte {versao: 1}
+
+            par Validar hubs de origem e destino
+                PLN->>GEO: validarHubs(hubOrigemId, hubDestinoId)
+                GEO-->>PLN: ValidacaoHubsDTO {origemAtivo, destinoAtivo, erros}
+            and Verificar compatibilidade da frota
+                PLN->>FRT: verificarCompatibilidade(CompatibilidadeRequestDTO {tipoMaterial, pesoKg})
+                FRT-->>PLN: CompatibilidadeDTO {agvsCompativeis, erros}
+            and Calcular rota preliminar
+                PLN->>GEO: calcularRota(RotaRequestDTO {origem, destino, restricoes})
+                GEO-->>PLN: RotaDTO {trechos, distanciaM, etaSeg, rotaValida}
+            end
+
+            Note over PLN: consolidarAnalise(): erros = hubs + frota + (rota.etaSeg > prazoSeg ? PRAZO_INVIAVEL)
+            alt erros.size == 0 E rota.valida == true
+                PLN->>PRI: calcularPrioridade(CriteriosPrioridadeDTO {prioridadeErp, prazo, criticidadeMaterial})
+                PRI-->>PLN: PrioridadeDTO {nivel, score, furaFila}
+                PLN->>REP: atualizarStatus(id, PRIORIZADA, versao 1)
+                REP-->>PLN: SolicitacaoTransporte {versao: 2}
+                PLN->>MIS: criarMissao(CriarMissaoDTO {solicitacaoId, rota, prioridade})
+                MIS-->>PLN: MissaoDTO {missaoId, status: PLANEJADA, posicaoFila}
+                PLN->>REP: vincularMissao(id, missaoId, versao 2)
+                REP-->>PLN: SolicitacaoTransporte {status: EM_ATENDIMENTO, versao: 3}
+                PLN-)NTF: notificarStatus(StatusSolicitacaoDTO {ACEITA, missaoId, etaPrevisto}) [AMQP fila erp.notificacoes]
+
+                loop Até resposta 2xx ou 5 tentativas (backoff exponencial 1 s → 16 s)
+                    NTF->>ERP: receberStatus(StatusSolicitacaoDTO) [Webhook HTTPS + assinatura HMAC]
+                    ERP-->>NTF: 204 No Content | 5xx
+                end
+
+                opt Missão encerrada no contexto de Orquestração (assíncrono, minutos depois)
+                    MIS-)SVC: registrarDesfecho(MissaoEncerradaEvent {missaoId, CONCLUIDA}) [AMQP]
+                    SVC->>REP: atualizarStatus(id, ATENDIDA, versao 3)
+                    REP-->>SVC: SolicitacaoTransporte {versao: 4}
+                    SVC-)NTF: notificarStatus(StatusSolicitacaoDTO {ATENDIDA}) [AMQP]
+                end
+            else erros.size > 0
+                PLN->>REP: atualizarStatus(id, REJEITADA, versao 1)
+                REP-->>PLN: SolicitacaoTransporte {versao: 2}
+                PLN-)NTF: notificarStatus(StatusSolicitacaoDTO {REJEITADA, motivos}) [AMQP]
+            else erros.size == 0 E rota.valida == false (corredor bloqueado)
+                PLN->>REP: atualizarStatus(id, PENDENTE_ROTA, versao 1)
+                REP-->>PLN: SolicitacaoTransporte {versao: 2}
+                PLN-)PLN: agendarReprocessamento(id, backoff) [AMQP fila com atraso]
+            end
+        end
+    end
