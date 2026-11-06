@@ -1,0 +1,95 @@
+stateDiagram-v2
+    %% =====================================================================
+    %% Artefato 3 — Diagrama de Transição de Estados (State Machine)
+    %% Entidade de domínio: VeiculoAGV
+    %% Funcionalidade: Despacho de Rota com Checagem de Bateria
+    %%                 e Sincronização de Telemetria
+    %%
+    %% Sintaxe formal das transições:  gatilho [condiçãoDeGuarda] / açãoDeEfeito()
+    %% Ações internas dos estados:     entry / ... | do / ... | exit / ...
+    %% Estados conforme a Seção 4.2 da Visão de Domínio Consolidada.
+    %% =====================================================================
+
+    state "Disponível" as Disponivel
+    state "Reservado" as Reservado
+    state "Executando Missão" as ExecutandoMissao
+    state "Carregando Bateria" as CarregandoBateria
+    state "Em Manutenção" as EmManutencao
+    state "Bloqueado" as Bloqueado
+    state "Fora de Serviço" as ForaDeServico
+    state verificaBateria <<choice>>
+
+    %% ---------- Ações internas (compartimentos entry / do / exit) ----------
+    Disponivel : entry / publicarAGVDisponibilizado()
+    Disponivel : do / transmitirHeartbeat()
+
+    Reservado : entry / travarAGVParaMissao()
+    Reservado : do / aguardarAckComandoRota()
+    Reservado : exit / registrarInicioMissao()
+
+    CarregandoBateria : entry / acoplarEstacaoRecarga()
+    CarregandoBateria : do / monitorarNivelCarga()
+    CarregandoBateria : exit / desacoplarEstacaoRecarga()
+
+    Bloqueado : entry / emitirAlertaOperacional()
+    Bloqueado : do / tentarReconexaoERota()
+    Bloqueado : exit / limparAlerta()
+
+    EmManutencao : entry / abrirOrdemManutencao()
+    EmManutencao : exit / recalibrarSensores()
+
+    %% ---------- Estado inicial ----------
+    [*] --> Disponivel : registrarAGV() / inicializarTelemetria()
+
+    %% ---------- Despacho com checagem de bateria ----------
+    Disponivel --> Reservado : despachoSolicitado [autonomiaWh >= consumoWh * 1.25 AND nivelPct >= 20] / reservarTrechos()
+    Disponivel --> CarregandoBateria : despachoSolicitado [autonomiaWh < consumoWh * 1.25 OR nivelPct < 20] / enviarParaRecarga()
+    Disponivel --> EmManutencao : manutencaoAgendada / retirarDaFrota()
+
+    Reservado --> ExecutandoMissao : comandoRotaAceito [reserva.confirmada == true] / publicarMissaoIniciada()
+    Reservado --> Disponivel : conflitoReserva [reserva.confirmada == false] / liberarAGV()
+
+    %% ---------- Estado composto com subestados ----------
+    state ExecutandoMissao {
+        state "Em Deslocamento para Coleta" as DeslocamentoColeta
+        state "Em Transporte" as EmTransporte
+
+        DeslocamentoColeta : do / sincronizarTelemetria()
+        EmTransporte : entry / registrarColetaConcluida()
+        EmTransporte : do / sincronizarTelemetria()
+
+        [*] --> DeslocamentoColeta
+        DeslocamentoColeta --> EmTransporte : coletaConcluida [pesoKg <= capacidadeKg] / iniciarTrechoDestino()
+        EmTransporte --> [*] : entregaConfirmada / registrarMissaoConcluida()
+    }
+
+    %% ---------- Saída da missão: nova checagem de bateria ----------
+    ExecutandoMissao --> verificaBateria : missaoConcluida / liberarReservaRota()
+    verificaBateria --> Disponivel : [nivelPct >= 20]
+    verificaBateria --> CarregandoBateria : [nivelPct < 20] / enviarParaRecarga()
+
+    %% ---------- Exceções durante a execução ----------
+    ExecutandoMissao --> CarregandoBateria : bateriaCriticaDetectada [nivelPct < 15] / redistribuirMissao()
+    ExecutandoMissao --> Bloqueado : rotaBloqueada / pausarMissao()
+    ExecutandoMissao --> Bloqueado : perdaComunicacao [semTelemetriaHa >= 3s] / pausarMissao()
+    ExecutandoMissao --> EmManutencao : falhaMecanica / registrarFalhaERedistribuir()
+
+    Bloqueado --> ExecutandoMissao : rotaLiberada [tempoBloqueadoS < 120] / retomarMissao()
+    Bloqueado --> EmManutencao : timeoutBloqueio [tempoBloqueadoS >= 120] / redistribuirMissao()
+
+    %% ---------- Recarga e manutenção ----------
+    CarregandoBateria --> Disponivel : cargaConcluida [nivelPct >= 90] / disponibilizarAGV()
+    CarregandoBateria --> EmManutencao : falhaCarregamento / registrarFalha()
+
+    EmManutencao --> Disponivel : manutencaoConcluida [diagnostico == APROVADO] / disponibilizarAGV()
+    EmManutencao --> ForaDeServico : diagnosticoConcluido [reparoViavel == false] / descomissionarAGV()
+
+    %% ---------- Estado terminal ----------
+    ForaDeServico --> [*]
+
+    note right of CarregandoBateria
+        Política de Recarregamento:
+        entra por bateria insuficiente no despacho,
+        por bateria crítica em execução
+        ou ao concluir a missão com nível < 20%.
+    end note
