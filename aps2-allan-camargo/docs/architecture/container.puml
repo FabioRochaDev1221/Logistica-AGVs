@@ -1,1 +1,53 @@
-' Visão C4 nível 2 (Contêineres) — Logística AGVs
+' C4 nivel 2 - conteineres da logistica de AGVs
+@startuml
+!pragma layout smetana
+!include <C4/C4_Container>
+
+LAYOUT_TOP_DOWN()
+
+title Logística AGVs - Contêineres (C4 nível 2)
+
+Person(operador, "Operador logístico", "Acompanha as missões e confirma a recuperação de carga quando um AGV falha carregado.")
+
+System_Boundary(sgl, "Sistema de Gestão de Missões de AGVs") {
+    Container(web, "Interface Web de Monitoramento", "React, TypeScript", "Painel com missões, AGVs e alertas em tempo real.")
+
+    Container(api, "API de Gestão de Missões", "Java 21, Spring Boot", "Ciclo de vida da MissaoTransporte. Módulos: MissaoService, RotaService, NotificacaoService, MissaoRepository.")
+
+    Container(monitor, "Serviço de Monitoramento de AGVs", "Java 21, Spring Boot", "MonitoramentoAGVService. Processa telemetria, controla heartbeat e confirma falhas. Separado da API por causa do volume de telemetria.")
+
+    Container(redist, "Serviço de Redistribuição", "Java 21, Spring Boot", "RedistribuicaoService e SelecaoAGVService. Consome eventos de falha e conduz a troca de AGV. Pode ter várias réplicas consumindo a mesma fila.")
+
+    Container(gateway, "Gateway de Comunicação", "Node.js, servidor MQTT (Aedes)", "AGVGateway. Mantém as conexões MQTT com os AGVs e traduz mensagens para eventos internos.")
+
+    ContainerQueue(broker, "Broker de Mensagens", "RabbitMQ 3.13, AMQP 0-9-1", "Filas duráveis, ack manual, dead-letter e reentrega com atraso.")
+
+    ContainerDb(db, "Banco de Dados", "PostgreSQL 16", "Missões (com versão e missao_origem_id único), estado e reserva dos AGVs, eventos processados e auditoria.")
+}
+
+System_Ext(agvs, "Dispositivos AGV", "Veículos autônomos do parque industrial. Enviam telemetria a cada 2 s e executam ordens de missão.")
+
+Rel(operador, web, "Acompanha missões e confirma transferência de carga", "HTTPS")
+Rel(web, api, "Consulta e altera missões", "HTTPS/REST, JSON")
+Rel_Back(web, api, "Notificações do operador", "WebSocket (WSS)")
+
+BiRel(agvs, gateway, "Telemetria, status e aceite / ordens e pedidos de status", "MQTT sobre TLS, QoS 1")
+Rel(gateway, broker, "Publica telemetria e aceite", "AMQP")
+
+Rel(broker, monitor, "Entrega agv.telemetria", "AMQP")
+Rel(monitor, broker, "Publica interrupcao-suspeita e falha-confirmada", "AMQP")
+Rel(monitor, gateway, "solicitarStatus()", "HTTPS/REST, timeout 2 s")
+
+Rel(broker, redist, "Entrega eventos de falha, aceite e carga liberada", "AMQP, ack manual")
+Rel(redist, broker, "Agenda missao.reavaliar", "AMQP")
+Rel(redist, api, "Altera estado das missões, calcula rotas e notifica", "HTTPS/REST")
+Rel(redist, monitor, "listarAGVsAptos()", "HTTPS/REST")
+Rel(redist, gateway, "enviarOrdemMissao()", "HTTPS/REST")
+Rel(api, broker, "Publica missao.carga-liberada", "AMQP")
+
+Rel(api, db, "Lê e grava missões", "JDBC")
+Rel(monitor, db, "Grava estado dos AGVs", "JDBC")
+Rel(redist, db, "Reserva AGVs e registra eventos e auditoria", "JDBC")
+
+SHOW_LEGEND()
+@enduml
