@@ -1,0 +1,114 @@
+flowchart TB
+    %% =====================================================================
+    %% Artefato 2 — Diagrama de Atividades com Raias (Swimlanes)
+    %% Funcionalidade: Recarga Programada e Balanceamento de Frota
+    %% Escopo: avaliação de um AGV dentro do ciclo de planejamento (60 s)
+    %%
+    %% Notação UML representada em Mermaid flowchart:
+    %%   subgraph        = raia de partição (swimlane)
+    %%   (( ))           = nó inicial      |  ((( )))  = nó final de atividade
+    %%   ( )             = ação            |  { }      = nó de decisão / merge
+    %%   barra preta     = fork (divisão) e join (sincronização)
+    %%   |[guarda]|      = condição de guarda (mutuamente exclusivas por decisão)
+    %% =====================================================================
+
+    subgraph L1["Supervisor de Operações (Painel)"]
+        direction TB
+        S1("Visualizar alerta de<br/>recarga adiada")
+        S2("Visualizar AGV disponibilizado<br/>e energia recarregada")
+        FIM_ADIADA((( )))
+        FIM_OK((( )))
+    end
+
+    subgraph L2["Sistema Back-End (Serviço de Gestão de Energia)"]
+        direction TB
+        INI(( ))
+        B1("Disparar ciclo de planejamento<br/>e selecionar AGV a avaliar")
+        FORK1[" "]
+        B2("Contar missões pendentes<br/>na janela de 30 min")
+        JOIN1[" "]
+        B3("Calcular capacidade da frota<br/>e classificar urgência do AGV")
+        D1{" "}
+        D2{" "}
+        B4("Reservar slot na estação<br/>mais próxima")
+        D3{" "}
+        B5("Publicar RecargaAdiada<br/>(motivo: balanceamento ou sem slot)")
+        M1{" "}
+        B6("Enviar comando de recarga<br/>e marcar CARREGANDO_BATERIA")
+        B7("Avaliar liberação<br/>(Balanceador de Frota)")
+        D4{" "}
+        M2{" "}
+        FORK2[" "]
+        B8("Marcar AGV como DISPONIVEL e publicar<br/>RecargaConcluida + AGVDisponibilizado")
+        JOIN2[" "]
+        FIM_NADA((( )))
+    end
+
+    subgraph L3["AGV (Hardware Embarcado)"]
+        direction TB
+        H1("Reportar nível de bateria<br/>(última telemetria)")
+        H2("Deslocar-se até a estação<br/>e acoplar")
+        H3("Desacoplar e seguir para<br/>área de espera")
+    end
+
+    subgraph L4["Estação de Recarga (Controlador OPC UA)"]
+        direction TB
+        E1("Reportar slots livres<br/>e potência disponível")
+        E2("Confirmar acoplamento e<br/>iniciar carga (alvo 90%)")
+        E3("Transmitir leitura de carga<br/>a cada 5 s")
+        E4("Parar carga e registrar<br/>energia entregue (Wh)")
+    end
+
+    %% ---------- Disparo e diagnóstico em paralelo ----------
+    INI --> B1 --> FORK1
+    FORK1 --> B2
+    FORK1 --> H1
+    FORK1 --> E1
+    B2 --> JOIN1
+    H1 --> JOIN1
+    E1 --> JOIN1
+    JOIN1 --> B3 --> D1
+
+    %% ---------- Política de Recarregamento ----------
+    D1 -->|"[nivelPct < 20]"| B4
+    D1 -->|"[20 <= nivelPct < 50 AND agv.ocioso == true]"| D2
+    D1 -->|"[nivelPct >= 50 OR (nivelPct >= 20 AND agv.ocioso == false)]"| FIM_NADA
+
+    %% ---------- Política de Balanceamento de Frota ----------
+    D2 -->|"[capacidade.disponiveis - 1 >= minimoOperacional]"| B4
+    D2 -->|"[capacidade.disponiveis - 1 < minimoOperacional]"| M1
+
+    %% ---------- Reserva de slot ----------
+    B4 --> D3
+    D3 -->|"[slot.reservado == true]"| B6
+    D3 -->|"[slot.reservado == false]"| M1
+    M1 --> B5 --> S1 --> FIM_ADIADA
+
+    %% ---------- Execução da carga ----------
+    B6 --> H2 --> E2 --> E3 --> B7 --> D4
+    D4 -->|"[nivelPct >= 90]"| M2
+    D4 -->|"[60 <= nivelPct < 90 AND missoesCriticas > 0]"| M2
+    D4 -->|"[nivelPct < 60 OR (nivelPct < 90 AND missoesCriticas == 0)]"| E3
+
+    %% ---------- Fork 2: liberação do AGV em paralelo ----------
+    M2 --> FORK2
+    FORK2 --> E4
+    FORK2 --> H3
+    FORK2 --> B8
+    E4 --> JOIN2
+    H3 --> JOIN2
+    B8 --> JOIN2
+    JOIN2 --> S2 --> FIM_OK
+
+    %% ---------- Estilos UML ----------
+    classDef inicio fill:#000,stroke:#000,color:#000
+    classDef fim fill:#000,stroke:#000,stroke-width:3px,color:#000
+    classDef barra fill:#000,stroke:#000,color:#000,font-size:2px
+    classDef decisao fill:#fff8dc,stroke:#8a6d00
+    classDef acao fill:#eef4ff,stroke:#2f5597
+
+    class INI inicio
+    class FIM_ADIADA,FIM_OK,FIM_NADA fim
+    class FORK1,JOIN1,FORK2,JOIN2 barra
+    class D1,D2,D3,D4,M1,M2 decisao
+    class S1,S2,B1,B2,B3,B4,B5,B6,B7,B8,H1,H2,H3,E1,E2,E3,E4 acao
