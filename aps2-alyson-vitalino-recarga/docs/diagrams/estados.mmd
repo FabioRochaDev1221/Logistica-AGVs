@@ -1,0 +1,91 @@
+stateDiagram-v2
+    %% =====================================================================
+    %% Artefato 3 — Diagrama de Transição de Estados (State Machine)
+    %% Entidade de domínio: SessaoRecarga
+    %% Funcionalidade: Recarga Programada e Balanceamento de Frota
+    %%
+    %% Sintaxe formal das transições:  gatilho [condiçãoDeGuarda] / açãoDeEfeito()
+    %% Ações internas dos estados:     entry / ... | do / ... | exit / ...
+    %%
+    %% A SessaoRecarga complementa o VeiculoAGV (dossiê de Despacho):
+    %% enquanto a sessão está entre SlotReservado e EmCarga/Suspensa,
+    %% o AGV correspondente permanece no estado "Carregando Bateria".
+    %% =====================================================================
+
+    state "Planejada" as Planejada
+    state "Adiada" as Adiada
+    state "Slot Reservado" as SlotReservado
+    state "Em Carga" as EmCarga
+    state "Suspensa" as Suspensa
+    state "Concluída" as Concluida
+    state "Liberada Antecipadamente" as LiberadaAntecipadamente
+    state "Cancelada" as Cancelada
+    state "Falha" as Falha
+
+    %% ---------- Ações internas (compartimentos entry / do / exit) ----------
+    Planejada : entry / calcularScoreUrgencia()
+
+    Adiada : entry / publicarRecargaAdiada()
+    Adiada : do / aguardarProximoCiclo()
+    Adiada : exit / incrementarTentativas()
+
+    SlotReservado : entry / travarSlotComTTL()
+    SlotReservado : do / acompanharDeslocamentoAGV()
+    SlotReservado : exit / registrarHorarioChegada()
+
+    Suspensa : entry / suspenderCorrente()
+    Suspensa : do / monitorarTemperatura()
+    Suspensa : exit / emitirAlertaSeReincidente()
+
+    Concluida : entry / publicarRecargaConcluida(COMPLETA)
+    LiberadaAntecipadamente : entry / publicarRecargaConcluida(ANTECIPADA)
+    Falha : entry / liberarSlotEAbrirOrdemManutencao()
+
+    %% ---------- Estado inicial ----------
+    [*] --> Planejada : candidatoSelecionado / criarSessao(agvId, urgencia)
+
+    %% ---------- Políticas de Recarregamento e Balanceamento ----------
+    Planejada --> SlotReservado : slotConcedido [urgencia == OBRIGATORIA OR disponiveis - 1 >= minimoOperacional] / enviarParaRecarga()
+    Planejada --> Adiada : avaliacaoBalanceamento [urgencia == OPORTUNIDADE AND disponiveis - 1 < minimoOperacional] / registrarMotivo(BALANCEAMENTO_FROTA)
+    Planejada --> Adiada : slotNegado / registrarMotivo(SEM_SLOT_DISPONIVEL)
+
+    Adiada --> Planejada : novoCiclo [tentativas < 5 OR urgencia == OBRIGATORIA] / reavaliarCandidato()
+    Adiada --> Cancelada : novoCiclo [tentativas >= 5 AND urgencia == OPORTUNIDADE] / descartarSessao()
+
+    SlotReservado --> EmCarga : acoplamentoConfirmado / iniciarCarga(perfil)
+    SlotReservado --> Falha : timeoutDeslocamento [tempoDecorridoS > etaS * 2] / registrarFalha()
+
+    %% ---------- Estado composto: fases de carga de bateria Li-ion ----------
+    state EmCarga {
+        state "Corrente Constante (CC)" as CorrenteConstante
+        state "Tensão Constante (CV)" as TensaoConstante
+
+        CorrenteConstante : do / registrarLeituraCarga()
+        TensaoConstante : entry / reduzirCorrente()
+        TensaoConstante : do / registrarLeituraCarga()
+
+        [*] --> CorrenteConstante
+        CorrenteConstante --> TensaoConstante : leituraCarga [nivelPct >= 80] / mudarPerfilParaCV()
+        TensaoConstante --> [*] : leituraCarga [nivelPct >= 90] / pararCarga()
+    }
+
+    EmCarga --> Concluida : cargaCompleta / disponibilizarAGV()
+    EmCarga --> LiberadaAntecipadamente : liberacaoSolicitada [nivelPct >= 60 AND missoesCriticas > 0] / pararCargaEDisponibilizar()
+    EmCarga --> Suspensa : leituraCarga [temperaturaC > 45] / suspenderCarga()
+    EmCarga --> Falha : falhaCarregador / registrarFalha()
+
+    Suspensa --> EmCarga : leituraCarga [temperaturaC <= 35] / retomarCarga()
+    Suspensa --> Falha : timeoutResfriamento [tempoSuspensaS >= 600] / registrarFalha()
+
+    %% ---------- Estados terminais ----------
+    Concluida --> [*]
+    LiberadaAntecipadamente --> [*]
+    Cancelada --> [*]
+    Falha --> [*]
+
+    note right of LiberadaAntecipadamente
+        Balanceamento de Frota:
+        libera o AGV antes de 90% quando há
+        missões críticas pendentes e o nível
+        já garante a margem mínima de 60%.
+    end note
