@@ -1,0 +1,78 @@
+---
+title: Diagrama de Transição de Estados - Entidade ReservaRota
+---
+stateDiagram-v2
+    direction TB
+
+    [*] --> PENDENTE : reservarRota(SolicitacaoReservaDTO) / salvar(ReservaRota)
+
+    %% Estado composto: análise da reserva e resolução de conflitos
+    state PENDENTE {
+        [*] --> CalculandoRota
+        CalculandoRota --> AdquirindoLocks : rotaCalculada / adquirirLocks(trechos, agvId, janelas)
+        AdquirindoLocks --> ResolvendoConflito : lockNegado [sucesso == false] / publicar(ConflitoDetectadoEvent)
+        ResolvendoConflito --> CalculandoRota : decisao [estrategia == ROTA_ALTERNATIVA] / calcularRota(excluir=trechosEmConflito)
+        ResolvendoConflito --> TransferindoLocks : decisao [estrategia == PREEMPCAO] / pausarAgv(agvConflitanteId)
+        AdquirindoLocks --> [*] : lockConcedido [sucesso == true]
+        TransferindoLocks --> [*] : locksTransferidos [sucesso == true] / atualizarStatus(reservaPerdedoraId, SUSPENSA)
+        ResolvendoConflito --> [*] : decisao [estrategia == AGUARDAR_JANELA]
+    }
+
+    state decisaoReserva <<choice>>
+    PENDENTE --> decisaoReserva
+    decisaoReserva --> CONFIRMADA : [locksAdquiridos == true] / atualizarStatus(reservaId, CONFIRMADA)
+    decisaoReserva --> EM_ESPERA : [estrategia == AGUARDAR_JANELA] / atualizarStatus(reservaId, EM_ESPERA)
+
+    CONFIRMADA : entry / publicar(RotaReservadaEvent)
+    CONFIRMADA : exit / registrarHorarioAtivacao()
+
+    EM_ESPERA : entry / agendarTimeoutEspera()
+    EM_ESPERA : do / aguardarTrechoLiberado()
+    EM_ESPERA : exit / incrementarTentativas()
+
+    EM_ESPERA --> PENDENTE : TrechoLiberado [tentativas < maxTentativas] / calcularRota(origem, destino, ocupacao)
+    EM_ESPERA --> CANCELADA : timeoutEspera [tentativas >= maxTentativas] / publicar(ReservaExpiradaEvent)
+
+    CONFIRMADA --> ATIVA : ativarReserva(reservaId) [ConfirmacaoComandoDTO.aceito == true] / atualizarStatus(reservaId, ATIVA)
+    CONFIRMADA --> CANCELADA : missaoCancelada / liberarLocks(reservaId)
+
+    %% Estado composto: execução e sincronização com a telemetria
+    state ATIVA {
+        [*] --> PercorrendoTrecho
+        PercorrendoTrecho --> LiberandoTrecho : PosicaoAtualizada [trechoAtual != trechoAnterior] / liberarLock(trechoPercorrido, agvId)
+        LiberandoTrecho --> PercorrendoTrecho : [trechosRestantes > 0] / publicar(TrechoLiberadoEvent)
+        PercorrendoTrecho --> RecalculandoRota : BloqueioCorredor [bloqueioDetectado == true] / recalcularRota(reservaId, BloqueioDTO)
+        RecalculandoRota --> PercorrendoTrecho : locksAdquiridos [sucesso == true] / enviarRota(agvId, RotaDTO)
+        LiberandoTrecho --> [*] : [trechosRestantes == 0]
+    }
+
+    note right of ATIVA
+        entry / atualizarStatus(reservaId, ATIVA)
+        do / sincronizarComTelemetria()
+        exit / liberarLocks(reservaId)
+    end note
+
+    ATIVA --> SUSPENSA : preempcaoSolicitada [prioridadeNova > prioridadeAtual] / pausarAgv(agvId)
+    ATIVA --> CONCLUIDA : liberarReserva(reservaId) / publicar(ReservaLiberadaEvent)
+    ATIVA --> CANCELADA : missaoInterrompida / liberarLocks(reservaId)
+
+    SUSPENSA : entry / publicar(ReservaSuspensaEvent)
+    SUSPENSA : do / aguardarLiberacaoCorredor()
+    SUSPENSA : exit / registrarRetomada()
+
+    SUSPENSA --> PENDENTE : corredorLiberado [agvPausado == true] / calcularRota(posicaoAtual, destino, ocupacao)
+    SUSPENSA --> CANCELADA : missaoCancelada / liberarLocks(reservaId)
+
+    CONCLUIDA : entry / atualizarStatus(reservaId, CONCLUIDA)
+    CANCELADA : entry / atualizarStatus(reservaId, CANCELADA)
+
+    CONCLUIDA --> [*]
+    CANCELADA --> [*]
+
+    note left of PENDENTE
+        Proteção contra estados inválidos:
+        transições não modeladas são rejeitadas
+        (ex.: ativarReserva em PENDENTE ou EM_ESPERA)
+        e toda mudança de status usa versionamento
+        otimista (campo versao) no PostgreSQL.
+    end note
