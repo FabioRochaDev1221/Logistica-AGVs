@@ -1,0 +1,17 @@
+
+stateDiagram-v2
+    [*] --> Disponivel
+
+    Disponivel --> EmTransito: Despacho autorizado
+    EmTransito --> Disponivel: Entrega concluida
+
+    Disponivel --> EmCarregamento: Bateria baixa
+    EmCarregamento --> Disponivel: Carga suficiente
+
+    EmTransito --> EmFalhaOperacional: Falha detectada
+    Disponivel --> EmFalhaOperacional: Falha detectada
+    EmCarregamento --> EmFalhaOperacional: Falha detectada
+
+    EmFalhaOperacional --> Disponivel: Falha resolvida e AGV liberado
+    EmFalhaOperacional --> EmCarregamento: Reparo concluido e recarga necessaria
+

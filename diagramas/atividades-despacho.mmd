@@ -1,0 +1,39 @@
+
+flowchart TD
+    A([Inicio]) --> B[Operador solicita entrega]
+    B --> C[Orquestrador recebe solicitacao]
+    C --> D[Selecionar AGV]
+    D --> E{AGV disponivel?}
+
+    E -->|Nao| F[Informar indisponibilidade]
+    F --> Z([Fim])
+
+    E -->|Sim| FORK[[FORK - Iniciar verificacoes paralelas]]
+
+    FORK --> G[Verificar nivel de bateria]
+    FORK --> H[Verificar desobstrucao da rota]
+
+    G --> I{Bateria suficiente?}
+    H --> J{Rota livre?}
+
+    I -->|Sim| K[Registrar bateria aprovada]
+    I -->|Nao| L[Registrar bateria insuficiente]
+
+    J -->|Sim| M[Registrar rota aprovada]
+    J -->|Nao| N[Registrar rota bloqueada]
+
+    K --> JOIN[[JOIN - Sincronizar resultados]]
+    L --> JOIN
+    M --> JOIN
+    N --> JOIN
+
+    JOIN --> O{Bateria e rota aprovadas?}
+
+    O -->|Sim| P[Enviar rota ao AGV]
+    P --> Q[AGV confirma recebimento]
+    Q --> R[Informar despacho realizado]
+    R --> Z
+
+    O -->|Nao| S[Bloquear despacho]
+    S --> T[Informar motivo ao operador]
+    T --> Z
