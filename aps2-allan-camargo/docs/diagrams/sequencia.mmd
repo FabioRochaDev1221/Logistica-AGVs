@@ -147,7 +147,9 @@ sequenceDiagram
 
         RED ->>+ GW: enviarOrdemMissao(OrdemMissaoDTO)
         GW -->>- RED: EnvioDTO [comandoId]
-        GW -) AGV2: ordem de missão S-101 [MQTT, QoS 1]
+        loop reenvio enquanto não houver PUBACK do AGV (máx. 3)
+            GW -) AGV2: ordem de missão S-101 [MQTT, QoS 1]
+        end
 
         alt AGV-12 aceita em até 30 s
             AGV2 -) GW: aceite(comandoId) [MQTT]
@@ -157,7 +159,7 @@ sequenceDiagram
             MIS -->>- RED: MissaoDTO [S-101, estado = EmExecucao]
             RED ->>+ SEL: confirmarReserva(reservaId)
             SEL -->>- RED: ReservaDTO [CONFIRMADA]
-        else Recusa ou timeout de aceite
+        else Recusa, timeout de aceite ou erro de comunicação
             RED ->>+ MIS: liberarAtribuicao(S-101, motivo)
             MIS -->>- RED: MissaoDTO [S-101, estado = AguardandoAtribuicao]
             RED ->>+ SEL: liberarReserva(reservaId)
