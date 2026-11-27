@@ -584,20 +584,20 @@ stateDiagram-v2
         state "ProntaParaDespacho" as ProntaParaDespacho
         ProntaParaDespacho : entry / selecionarCandidatos()
         [*] --> origemCarga
-        origemCarga --> BloqueadaPorCarga : [missaoOrigem.cargaEmbarcada]
-        origemCarga --> ProntaParaDespacho : [sem carga embarcada na origem]
+        origemCarga --> BloqueadaPorCarga : [cargaLiberada = false]
+        origemCarga --> ProntaParaDespacho : [cargaLiberada = true]
         BloqueadaPorCarga --> ProntaParaDespacho : cargaLiberada [operador confirmou] / confirmarRecuperacaoCarga()
         ProntaParaDespacho --> SemCandidato : reservaVazia / notificarOperador()
         SemCandidato --> ProntaParaDespacho : reavaliar [após 60 s]
     }
 
-    AguardandoAtribuicao --> Atribuida : agvReservado [reservarSeDisponivel() = true] / atribuirAGV()
+    AguardandoAtribuicao --> Atribuida : agvReservado [em ProntaParaDespacho e reservarSeDisponivel() = true] / atribuirAGV()
     AguardandoAtribuicao --> Cancelada : cancelar / registrarAuditoria()
 
     state "Atribuida" as Atribuida
     Atribuida : entry / enviarOrdemMissao()
     Atribuida : do / aguardar aceite (30 s)
-    Atribuida --> EmExecucao : aceiteRecebido [comandoId válido] / confirmarReserva()
+    Atribuida --> EmExecucao : aceiteRecebido [comandoId válido e confirmarSeAtiva() = true] / confirmarReserva(), confirmarAceite()
     Atribuida --> AguardandoAtribuicao : recusa ou timeoutAceite / liberarAtribuicao(), liberarReserva()
 
     state EmExecucao {
@@ -609,7 +609,7 @@ stateDiagram-v2
     }
 
     EmExecucao --> Concluida : entregaConfirmada / registrarAuditoria()
-    EmExecucao --> Interrompida : interrupcaoSuspeita [evento novo] / interromperMissao()
+    EmExecucao --> Interrompida : interrupcaoSuspeita [evento não processado] / interromperMissao()
 
     state "Interrompida" as Interrompida
     Interrompida : entry / suspender comandos ao AGV
@@ -620,7 +620,6 @@ stateDiagram-v2
 
     state "Falha" as Falha
     Falha : entry / liberar AGV original da responsabilidade
-    Falha : exit / avaliarPolitica() e criarMissaoSubstituta()
 
     Concluida --> [*]
     Cancelada --> [*]
@@ -629,6 +628,8 @@ stateDiagram-v2
     note right of Falha
         Estado final da missão original.
         Não existe transição de Falha para EmExecucao.
+        Depois da entrada em Falha, o Serviço de Redistribuição
+        chama avaliarPolitica() e criarMissaoSubstituta().
         A entrega continua numa missão nova
         com id próprio e missaoOrigemId apontando para esta.
     end note
@@ -647,12 +648,16 @@ A transição crítica é:
 Interrompida --> Falha : falhaConfirmada [3 tentativas sem resposta ou codigoFalha] / registrarFalha()
 ```
 
-O evento é o `FalhaConfirmadaEvent`. A guarda garante que a tolerância foi esgotada ou que o próprio AGV reportou a falha. O efeito grava a falha com lock otimista. O `entry` de `Falha` libera o AGV original da responsabilidade, e o `exit` dispara a política e a criação da substituta.
+O evento é o `FalhaConfirmadaEvent`. A guarda garante que a tolerância foi esgotada ou que o próprio AGV reportou a falha. O efeito grava a falha com lock otimista. O `entry` de `Falha` libera o AGV original da responsabilidade. A política e a criação da substituta acontecem depois, no Serviço de Redistribuição, e não são ações da missão original.
+
+Na versão anterior, `Falha` tinha um `exit` com `avaliarPolitica()` e `criarMissaoSubstituta()`. Isso não fazia sentido num estado final, porque a missão nunca sai de `Falha`. Por isso o `exit` foi removido e a explicação ficou na nota.
 
 Algumas decisões do modelo:
 
 - **`Falha` é final.** Não existe `Falha → EmExecucao`. Se existisse, a mesma missão poderia ficar com dois AGVs ao longo do tempo e o histórico se perderia (regra de continuidade).
-- **A substituta começa em `Criada`** pelo mesmo caminho de qualquer missão. Dentro de `AguardandoAtribuicao`, o `<<choice>>` manda para `BloqueadaPorCarga` quando a origem estava com carga embarcada.
+- **A substituta começa em `Criada`** pelo mesmo caminho de qualquer missão. Dentro de `AguardandoAtribuicao`, o `<<choice>>` manda para `BloqueadaPorCarga` quando `cargaLiberada = false`, o que a `RegraContinuidade` grava quando a carga estava no AGV que falhou. Antes a guarda olhava só para a carga embarcada na origem. Com isso, uma substituta que voltasse de `Atribuida` depois de uma recusa ficaria bloqueada de novo, mesmo com a carga já liberada.
+- **`AguardandoAtribuicao → Atribuida`** tem a guarda `[em ProntaParaDespacho ...]`. Sem ela, a transição saindo do estado composto valeria também para `BloqueadaPorCarga`, e a invariante I5 seria quebrada.
+- **O aceite confirma a reserva primeiro** (`confirmarSeAtiva() = true`). Se a reserva venceu, o aceite é tratado como atrasado (ADR 0002).
 - **`Interrompida → EmExecucao`** só vale para o mesmo AGV (`[mesmo AGV e sem falha]`). É a única volta permitida.
 - **Transições de exceção:** recusa ou timeout de aceite (`Atribuida → AguardandoAtribuicao`), interrupção, falha e cancelamento.
 - **Proteção contra transições inválidas:** o serviço só aplica um evento se existir transição saindo do estado atual, e a gravação com `versaoEsperada` rejeita eventos que chegaram fora de ordem.
