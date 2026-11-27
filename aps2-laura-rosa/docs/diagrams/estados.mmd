@@ -1,0 +1,76 @@
+%% Artefato 3 — Diagrama de Transição de Estados
+%% Entidade de domínio: SolicitacaoTransporte (agregado raiz do contexto Integração Empresarial e Solicitação de Transporte)
+%% Sintaxe das transições: Gatilho [CondiçãoDeGuarda] / AçãoDeEfeito()
+%% EM_ANALISE é um superestado com 3 regiões concorrentes (equivalente ao Fork/Join do Diagrama de Atividades)
+stateDiagram-v2
+    direction TB
+
+    state "RECEBIDA" as Recebida
+    state "PENDENTE_ROTA" as PendenteRota
+    state "PRIORIZADA" as Priorizada
+    state "EM_ATENDIMENTO" as EmAtendimento
+    state "ATENDIDA" as Atendida
+    state "REJEITADA" as Rejeitada
+    state "CANCELADA" as Cancelada
+    state "NAO_ATENDIDA" as NaoAtendida
+
+    Recebida : entry / gravarOutbox(SolicitacaoRecebida)
+    PendenteRota : entry / agendarReprocessamento(backoff)
+    PendenteRota : exit / incrementarTentativa()
+    Priorizada : entry / registrarPrioridade()
+    EmAtendimento : entry / notificarERP(ACEITA)
+    EmAtendimento : do / acompanharMissao()
+    Atendida : entry / notificarERP(ATENDIDA)
+    Rejeitada : entry / notificarERP(REJEITADA)
+    Cancelada : entry / notificarERP(CANCELADA)
+    NaoAtendida : entry / notificarERP(NAO_ATENDIDA)
+
+    [*] --> Recebida : solicitacaoRecebida [token.valido E idExterno inédito] / registrarProtocolo()
+    Recebida --> EmAnalise : eventoConsumido [status == RECEBIDA] / iniciarAnalise()
+
+    state "EM_ANALISE" as EmAnalise {
+        state "VALIDANDO_HUBS" as ValidandoHubs
+        state "HUBS_AVALIADOS" as HubsAvaliados
+        state "VERIFICANDO_FROTA" as VerificandoFrota
+        state "FROTA_AVALIADA" as FrotaAvaliada
+        state "CALCULANDO_ROTA" as CalculandoRota
+        state "ROTA_AVALIADA" as RotaAvaliada
+        [*] --> ValidandoHubs
+        ValidandoHubs --> HubsAvaliados : respostaHubs / registrarResultado()
+        HubsAvaliados --> [*]
+        --
+        [*] --> VerificandoFrota
+        VerificandoFrota --> FrotaAvaliada : respostaFrota / registrarResultado()
+        FrotaAvaliada --> [*]
+        --
+        [*] --> CalculandoRota
+        CalculandoRota --> RotaAvaliada : respostaRota / registrarResultado()
+        RotaAvaliada --> [*]
+    }
+
+    EmAnalise --> Priorizada : analiseConcluida [erros.size == 0 E rota.valida == true] / calcularPrioridade()
+    EmAnalise --> Rejeitada : analiseConcluida [erros.size > 0] / registrarMotivos()
+    EmAnalise --> PendenteRota : analiseConcluida [erros.size == 0 E rota.valida == false] / registrarMotivo(SEM_ROTA)
+
+    PendenteRota --> EmAnalise : backoffExpirado [tentativasRota < 5] / iniciarAnalise()
+    PendenteRota --> Rejeitada : backoffExpirado [tentativasRota ≥ 5] / registrarMotivo(ROTA_INDISPONIVEL)
+
+    Priorizada --> EmAtendimento : missaoCriada [missao.status == PLANEJADA] / vincularMissao()
+    Priorizada --> Cancelada : cancelamentoRecebido [origem == sistemaOrigem] / registrarCancelamento()
+
+    EmAtendimento --> Atendida : missaoConcluida [missao.status == CONCLUIDA] / registrarDesfecho()
+    EmAtendimento --> Priorizada : missaoFalhou [tentativasMissao < 3] / desvincularMissao()
+    EmAtendimento --> NaoAtendida : missaoFalhou [tentativasMissao ≥ 3] / registrarDesfecho()
+    EmAtendimento --> Cancelada : cancelamentoRecebido [missao.status == PLANEJADA OU missao.status == AGUARDANDO_ALOCACAO] / cancelarMissao()
+
+    Atendida --> [*]
+    Rejeitada --> [*]
+    Cancelada --> [*]
+    NaoAtendida --> [*]
+
+    classDef sucesso fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef erro fill:#ffebee,stroke:#c62828,color:#b71c1c
+    classDef pausa fill:#fff8e1,stroke:#f9a825,color:#5d4037
+    class Atendida sucesso
+    class Rejeitada,Cancelada,NaoAtendida erro
+    class PendenteRota pausa

@@ -1,0 +1,92 @@
+%% Artefato 2 — Diagrama de Atividades com Raias (versão Mermaid)
+%% Funcionalidade: Recepção de Solicitação via ERP/WMS/MES e Planejamento da Missão
+%% Raias: ERP/WMS/MES | Integração Empresarial | Planejamento da Solicitação | Serviços de Apoio | Orquestração de Missões
+%% Versão canônica com raias estritas: atividades.puml (mesmas ações, guardas, forks e joins)
+flowchart TB
+    subgraph L1["🏭 Raia 1 — ERP / WMS / MES (Sistema corporativo)"]
+        INI(((Início)))
+        A1[Gerar ordem de movimentação de material]
+        A2[Enviar solicitação — POST + OAuth 2.0 + HMAC]
+        A3[Registrar erro de integração]
+        A4[Corrigir dados e reenviar]
+        A5[Manter protocolo já registrado]
+        A6[Registrar protocolo e aguardar callback]
+        A7[Tratar rejeição da ordem]
+        A8[Atualizar ordem com missaoId e ETA]
+        FIM1(((Fim)))
+        FIM2(((Fim)))
+    end
+
+    subgraph L2["🔌 Raia 2 — Integração Empresarial (Controller, ACL, SolicitacaoService)"]
+        B1[Autenticar requisição]
+        D1{Requisição autenticada?}
+        B2[Responder 401 Unauthorized]
+        B3[Traduzir payload para o modelo de domínio — ACL]
+        D2{Payload válido?}
+        B4[Responder 422 com violações]
+        D3{Solicitação já registrada?}
+        B5[Responder 200 com protocolo existente]
+        B6[Persistir RECEBIDA + outbox — mesma transação]
+        B7[Responder 202 Accepted com protocolo]
+        FK1@{ shape: fork, label: "Fork 1" }
+        B8[Publicar SolicitacaoRecebida — outbox → AMQP]
+        JN1@{ shape: fork, label: "Join 1" }
+        B9[Notificar ERP: REJEITADA com motivos — webhook]
+        B10[Notificar ERP: ACEITA com missaoId — webhook]
+    end
+
+    subgraph L3["🧭 Raia 3 — Planejamento da Solicitação (PlanejamentoService, Priorização)"]
+        C1[Mudar solicitação para EM_ANALISE]
+        FK2@{ shape: fork, label: "Fork 2" }
+        JN2@{ shape: fork, label: "Join 2" }
+        C2[Consolidar análise — inclui viabilidade do prazo]
+        D4{Resultado da análise?}
+        C3[Mudar para PENDENTE_ROTA e aguardar backoff]
+        D5{Há tentativas restantes?}
+        C4[Mudar solicitação para REJEITADA]
+        C5[Calcular prioridade — Política de Priorização]
+        C6[Mudar solicitação para PRIORIZADA]
+        C7[Vincular missão e mudar para EM_ATENDIMENTO]
+        FK3@{ shape: fork, label: "Fork 3" }
+        JN3@{ shape: fork, label: "Join 3" }
+    end
+
+    subgraph L4["🗺️ Raia 4 — Serviços de Apoio (Geolocalização, Frota)"]
+        E1[Validar hubs de origem e destino]
+        E2[Verificar compatibilidade da frota — material e peso]
+        E3[Calcular rota preliminar]
+    end
+
+    subgraph L5["⚙️ Raia 5 — Orquestração de Missões (MissaoService)"]
+        F1[Criar MissaoTransporte PLANEJADA]
+        F2[Enfileirar missão para alocação de AGV]
+    end
+
+    INI --> A1 --> A2 --> B1 --> D1
+    D1 -->|"[token.valido == false OU hmac.valido == false]"| B2 --> A3 --> FIM1
+    D1 -->|"[token.valido == true E hmac.valido == true]"| B3 --> D2
+    D2 -->|"[violacoes.size > 0]"| B4 --> A4 --> FIM1
+    D2 -->|"[violacoes.size == 0]"| D3
+    D3 -->|"[idExterno já existe]"| B5 --> A5 --> FIM1
+    D3 -->|"[idExterno inédito]"| B6 --> B7 --> FK1
+    FK1 --> A6 --> JN1
+    FK1 --> B8 --> JN1
+    JN1 --> C1 --> FK2
+    FK2 --> E1 --> JN2
+    FK2 --> E2 --> JN2
+    FK2 --> E3 --> JN2
+    JN2 --> C2 --> D4
+    D4 -->|"[erros.size > 0]"| C4
+    D4 -->|"[erros.size == 0 E rota.valida == false]"| C3 --> D5
+    D5 -->|"[tentativasRota < 5]"| C1
+    D5 -->|"[tentativasRota ≥ 5]"| C4
+    C4 --> B9 --> A7 --> FIM2
+    D4 -->|"[erros.size == 0 E rota.valida == true]"| C5 --> C6 --> F1 --> C7 --> FK3
+    FK3 --> F2 --> JN3
+    FK3 --> B10 --> A8 --> JN3
+    JN3 --> FIM2
+
+    classDef decisao fill:#fff4d6,stroke:#b8860b,color:#222
+    classDef terminal fill:#222,stroke:#222,color:#fff
+    class D1,D2,D3,D4,D5 decisao
+    class INI,FIM1,FIM2 terminal

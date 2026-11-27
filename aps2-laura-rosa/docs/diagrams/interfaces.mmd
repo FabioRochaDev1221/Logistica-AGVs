@@ -1,0 +1,100 @@
+%% Contrato de operações públicas — base da Regra de Consistência do Diagrama de Sequência
+%% Toda mensagem enviada a uma linha de vida corresponde a uma operação abaixo.
+classDiagram
+    direction LR
+
+    class IErpCallback {
+        <<interface · sistema externo>>
+        +receberStatus(s: StatusSolicitacaoDTO) void
+    }
+    class IIntegracaoController {
+        <<interface>>
+        +receberSolicitacao(req: SolicitacaoExternaDTO) ProtocoloDTO
+    }
+    class ITradutorSolicitacaoACL {
+        <<interface>>
+        +traduzir(ext: SolicitacaoExternaDTO) ResultadoTraducaoDTO
+    }
+    class ISolicitacaoService {
+        <<interface>>
+        +registrar(cmd: ComandoCriarSolicitacao) ProtocoloDTO
+        +registrarDesfecho(evt: MissaoEncerradaEvent) void
+    }
+    class ISolicitacaoRepository {
+        <<interface>>
+        +buscarPorIdExterno(sistemaOrigem: String, idExterno: String) Optional~SolicitacaoTransporte~
+        +salvar(s: SolicitacaoTransporte) SolicitacaoTransporte
+        +atualizarStatus(id: UUID, novo: StatusSolicitacao, versao: long) SolicitacaoTransporte
+        +vincularMissao(id: UUID, missaoId: UUID, versao: long) SolicitacaoTransporte
+    }
+    class IPlanejamentoService {
+        <<interface>>
+        +processar(evt: SolicitacaoRecebidaEvent) void
+        +agendarReprocessamento(id: UUID, backoff: Duration) void
+    }
+    class IGeolocalizacaoService {
+        <<interface>>
+        +validarHubs(origemId: UUID, destinoId: UUID) ValidacaoHubsDTO
+        +calcularRota(req: RotaRequestDTO) RotaDTO
+    }
+    class IFrotaService {
+        <<interface>>
+        +verificarCompatibilidade(req: CompatibilidadeRequestDTO) CompatibilidadeDTO
+    }
+    class IPoliticaPriorizacao {
+        <<interface>>
+        +calcularPrioridade(c: CriteriosPrioridadeDTO) PrioridadeDTO
+    }
+    class IMissaoService {
+        <<interface>>
+        +criarMissao(cmd: CriarMissaoDTO) MissaoDTO
+    }
+    class IErpNotifier {
+        <<interface>>
+        +notificarStatus(s: StatusSolicitacaoDTO) void
+    }
+    class SolicitacaoTransporte {
+        <<Aggregate Root>>
+        -id: UUID
+        -sistemaOrigem: String
+        -idExterno: String
+        -hubOrigemId: UUID
+        -hubDestinoId: UUID
+        -tipoMaterial: TipoMaterial
+        -pesoKg: BigDecimal
+        -prioridade: NivelPrioridade
+        -prazo: Instant
+        -status: StatusSolicitacao
+        -missaoId: UUID
+        -tentativasRota: int
+        -versao: long
+        +transitar(gatilho: GatilhoSolicitacao) void
+    }
+    class StatusSolicitacao {
+        <<enumeration>>
+        RECEBIDA
+        EM_ANALISE
+        PENDENTE_ROTA
+        PRIORIZADA
+        EM_ATENDIMENTO
+        ATENDIDA
+        REJEITADA
+        CANCELADA
+        NAO_ATENDIDA
+    }
+
+    IIntegracaoController ..> ITradutorSolicitacaoACL
+    IIntegracaoController ..> ISolicitacaoService
+    ISolicitacaoService ..> ISolicitacaoRepository
+    ISolicitacaoService ..> IPlanejamentoService : AMQP
+    ISolicitacaoService ..> IErpNotifier : AMQP
+    IPlanejamentoService ..> ISolicitacaoRepository
+    IPlanejamentoService ..> IGeolocalizacaoService : gRPC
+    IPlanejamentoService ..> IFrotaService : gRPC
+    IPlanejamentoService ..> IPoliticaPriorizacao
+    IPlanejamentoService ..> IMissaoService : gRPC
+    IPlanejamentoService ..> IErpNotifier : AMQP
+    IMissaoService ..> ISolicitacaoService : AMQP
+    IErpNotifier ..> IErpCallback : Webhook HTTPS
+    ISolicitacaoRepository --> SolicitacaoTransporte
+    SolicitacaoTransporte --> StatusSolicitacao

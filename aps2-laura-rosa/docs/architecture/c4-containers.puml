@@ -1,0 +1,46 @@
+@startuml c4-containers
+' Artefato 4 — Visão de Contêineres (C4 Nível 2) em C4-PlantUML
+' Sistema: Plataforma de Orquestração de AGVs — Logística de Entregas Autônomas
+' Foco: Recepção de Solicitação via ERP/WMS/MES e Planejamento da Missão
+!include <C4/C4_Container>
+
+LAYOUT_TOP_DOWN()
+
+title Visão de Contêineres (C4 Nível 2) — Recepção de Solicitações e Planejamento da Missão
+
+Person(operador, "Operador / Supervisor Logístico", "Acompanha solicitações pendentes, rejeitadas e missões planejadas.")
+System_Ext(erp, "ERP / WMS / MES", "Sistemas corporativos que geram ordens de movimentação e recebem o status por webhook.")
+
+System_Boundary(plataforma, "Plataforma de Orquestração de AGVs") {
+    Container(spa, "Painel de Monitoramento", "React 18, TypeScript, Vite", "Lista de solicitações, motivos de rejeição e fila de missões.")
+    Container(apigw, "Gateway de API", "Kong 3.7", "Terminação TLS, validação de JWT, rate limiting por sistema de origem.")
+    Container(idp, "Servidor de Identidade", "Keycloak 24", "Emite tokens OAuth 2.0 (client credentials) para ERP/WMS/MES.")
+    Container(integ, "API de Integração e Solicitações", "Java 21, Spring Boot 3.3", "ACL, idempotência, ciclo de vida da SolicitacaoTransporte, análise, priorização e notificação ao ERP.")
+    Container(orq, "API de Orquestração de Missões", "Java 21, Spring Boot 3.3", "MissaoService (criarMissao) e FrotaService (verificarCompatibilidade).")
+    Container(geo, "Serviço de Geolocalização", "Python 3.12, FastAPI, gRPC", "Validação de hubs e cálculo de rotas preliminares.")
+
+    ContainerDb(dbSol, "Banco de Solicitações", "PostgreSQL 16", "Solicitações, chave única (sistemaOrigem, idExterno), outbox e log de webhooks.")
+    ContainerDb(dbMis, "Banco de Missões", "PostgreSQL 16", "Missões de transporte, AGVs e capacidades.")
+    ContainerDb(dbGeo, "Base Cartográfica", "PostgreSQL 16 + PostGIS 3.4", "Hubs, corredores logísticos e trechos.")
+    ContainerQueue(rabbit, "Barramento de Eventos", "RabbitMQ 3.13 (quorum queues)", "solicitacoes.recebidas, solicitacoes.reprocessamento (atraso), erp.notificacoes, missoes.encerradas, DLQ.")
+}
+
+Rel(erp, idp, "Obtém token", "OAuth 2.0 client credentials / HTTPS")
+Rel(erp, apigw, "receberSolicitacao()", "REST/JSON sobre HTTPS + assinatura HMAC")
+Rel(apigw, idp, "Valida assinatura do JWT", "OIDC JWKS / HTTPS")
+Rel(apigw, integ, "Encaminha requisição autenticada", "HTTP/1.1 + mTLS")
+Rel(operador, spa, "Acompanha solicitações", "HTTPS")
+Rel(spa, apigw, "Consulta solicitações e missões", "REST/JSON sobre HTTPS")
+
+Rel(integ, dbSol, "Grava solicitação + outbox na mesma transação", "JDBC / SQL")
+Rel(integ, rabbit, "Publica e consome processar(), notificarStatus(), agendarReprocessamento()", "AMQP 0-9-1 + TLS")
+Rel(integ, geo, "validarHubs() / calcularRota()", "gRPC / HTTP2 + TLS")
+Rel(integ, orq, "verificarCompatibilidade() / criarMissao()", "gRPC / HTTP2 + TLS")
+Rel(integ, erp, "receberStatus()", "Webhook HTTPS + assinatura HMAC")
+
+Rel(orq, dbMis, "Lê e grava missões", "JDBC / SQL")
+Rel(orq, rabbit, "Publica MissaoEncerrada (registrarDesfecho)", "AMQP 0-9-1 + TLS")
+Rel(geo, dbGeo, "Consulta hubs e grafo de corredores", "SQL / PostGIS")
+
+SHOW_LEGEND()
+@enduml
