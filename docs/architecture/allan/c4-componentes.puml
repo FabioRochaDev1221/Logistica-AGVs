@@ -1,0 +1,70 @@
+' C4 nivel 3 - componentes do Servico de Redistribuicao
+@startuml
+!pragma layout smetana
+!include <C4/C4_Component>
+
+LAYOUT_TOP_DOWN()
+
+title Serviço de Redistribuição - Componentes (C4 nível 3)
+
+ContainerQueue(broker, "Broker de Mensagens", "RabbitMQ 3.13, AMQP 0-9-1", "Filas duráveis, ack manual, dead-letter e reentrega com atraso.")
+
+Container_Boundary(redist, "Serviço de Redistribuição (Java 21, Spring Boot)") {
+    Component(consumidor, "ConsumidorEventos", "Spring AMQP, @RabbitListener", "Recebe os eventos, descarta os que já foram processados e só faz o ack depois que o processamento termina.")
+
+    Component(redistribuicao, "RedistribuicaoService", "Spring Service", "Trata a missão original: interrompe, registra a falha, aplica a política e pede a missão substituta.")
+
+    Component(politica, "PoliticaRedistribuicao", "Java", "avaliarPolitica(): missão em Falha, entrega não cancelada, prazo válido e menos de 3 redistribuições.")
+
+    Component(continuidade, "ControleContinuidade", "Spring Service", "Leva a substituta até o aceite: espera a carga ser liberada, faz até 3 tentativas de despacho e agenda a reavaliação.")
+
+    Component(selecao, "SelecaoAGVService", "Spring Service", "Elegibilidade: capacidade, rota viável e bateria com 20% de margem. Ordena os candidatos por ETA.")
+
+    Component(reserva, "ReservaAGVService", "Spring Service", "Reserva atômica, confirmação e liberação do AGV. Libera reservas vencidas (30 s).")
+
+    Component(agvRepo, "AGVRepository", "Spring JDBC", "reservarSeDisponivel() com UPDATE condicional e INSERT da reserva na mesma transação.")
+
+    Component(eventoRepo, "EventoRepository", "Spring JDBC", "Eventos processados (jaProcessado, marcarProcessado) e registros de auditoria.")
+
+    Component(publicador, "PublicadorEventos", "Spring AMQP, RabbitTemplate", "Publica missao.reavaliar com atraso de 60 s.")
+
+    Component(clientes, "Clientes REST", "Spring RestClient", "Implementam as interfaces MissaoService, RotaService, NotificacaoService, MonitoramentoAGVService e AGVGateway.")
+}
+
+ContainerDb(db, "Banco de Dados", "PostgreSQL 16", "AGVs e reservas (índice único de reserva ativa), eventos processados e auditoria.")
+
+Container(api, "API de Gestão de Missões", "Java 21, Spring Boot", "MissaoService (com a RegraContinuidade), RotaService e NotificacaoService.")
+
+Container(monitor, "Serviço de Monitoramento de AGVs", "Java 21, Spring Boot", "MonitoramentoAGVService. Informa os AGVs disponíveis e sem falha ativa.")
+
+Container(gateway, "Gateway de Comunicação", "Node.js, servidor MQTT (Aedes)", "AGVGateway. Envia a ordem ao AGV por MQTT QoS 1.")
+
+Rel(broker, consumidor, "Entrega interrupcao-suspeita, recuperado, falha-confirmada, carga-liberada, aceite e reavaliar", "AMQP, ack manual")
+Rel(consumidor, eventoRepo, "jaProcessado() e marcarProcessado()")
+Rel(consumidor, redistribuicao, "onInterrupcaoSuspeita(), onAgvRecuperado(), onFalhaConfirmada()")
+Rel(consumidor, continuidade, "onCargaLiberada(), onAceiteMissao(), onReavaliar()")
+
+Rel(redistribuicao, politica, "avaliarPolitica()")
+Rel(redistribuicao, continuidade, "continuarEntrega()")
+Rel(redistribuicao, clientes, "interromperMissao(), retomarMissao(), registrarFalha(), criarMissaoSubstituta(), notificarOperador()")
+Rel(redistribuicao, eventoRepo, "registrarAuditoria()")
+
+Rel(continuidade, selecao, "selecionarCandidatos()")
+Rel(continuidade, reserva, "reservarAGV(), confirmarReserva(), liberarReserva()")
+Rel(continuidade, clientes, "atribuirAGV(), enviarOrdemMissao(), confirmarAceite(), liberarAtribuicao(), notificarOperador()")
+Rel(continuidade, publicador, "agendarReavaliacao()")
+Rel(continuidade, eventoRepo, "registrarAuditoria()")
+
+Rel(selecao, clientes, "listarAGVsAptos(), calcularRota()")
+Rel(reserva, agvRepo, "reservarSeDisponivel(), confirmarSeAtiva(), liberar(), liberarVencidas()")
+Rel(reserva, publicador, "Reavaliação da missão com reserva vencida")
+
+Rel(agvRepo, db, "Lê e grava AGVs e reservas", "JDBC")
+Rel(eventoRepo, db, "INSERT ... ON CONFLICT DO NOTHING", "JDBC")
+Rel(publicador, broker, "Publica missao.reavaliar", "AMQP")
+Rel(clientes, api, "Missões, rotas e notificações", "HTTPS/REST")
+Rel(clientes, monitor, "listarAGVsAptos()", "HTTPS/REST")
+Rel(clientes, gateway, "enviarOrdemMissao()", "HTTPS/REST")
+
+SHOW_LEGEND()
+@enduml

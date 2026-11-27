@@ -15,10 +15,11 @@ Aluno: Allan Camargo
 7. [Diagrama de atividades](#7-diagrama-de-atividades)
 8. [Diagrama de estados](#8-diagrama-de-estados)
 9. [Visão C4 de contêineres](#9-visão-c4-de-contêineres)
-10. [ADR 0001](#10-adr-0001)
-11. [Matriz de rastreabilidade](#11-matriz-de-rastreabilidade)
-12. [Como visualizar e validar](#12-como-visualizar-e-validar)
-13. [Considerações finais](#13-considerações-finais)
+10. [Visão C4 de componentes](#10-visão-c4-de-componentes)
+11. [ADR 0001](#11-adr-0001)
+12. [Matriz de rastreabilidade](#12-matriz-de-rastreabilidade)
+13. [Como visualizar e validar](#13-como-visualizar-e-validar)
+14. [Considerações finais](#14-considerações-finais)
 
 ## 1. Problema
 
@@ -63,7 +64,9 @@ docs/
         ├── atividades.svg       atividades com raias (gerado)
         ├── estados.mmd          estados da MissaoTransporte (Mermaid)
         ├── c4-containers.puml   C4 nível 2 (fonte)
-        └── c4-containers.svg    C4 nível 2 (gerado)
+        ├── c4-containers.svg    C4 nível 2 (gerado)
+        ├── c4-componentes.puml  C4 nível 3 do Serviço de Redistribuição (fonte)
+        └── c4-componentes.svg   C4 nível 3 (gerado)
 ```
 
 Os diagramas ficam em `docs/architecture/allan/` e as ADRs em `docs/adr/`, como o professor pediu para a avaliação final.
@@ -632,7 +635,35 @@ Sobre o que virou contêiner e o que ficou como módulo:
 
 Protocolos: HTTPS/REST entre a Web e a API e entre os serviços; WebSocket para notificações; MQTT sobre TLS (QoS 1) entre os AGVs e o Gateway; AMQP com o RabbitMQ; JDBC com o PostgreSQL.
 
-## 10. ADR 0001
+## 10. Visão C4 de componentes
+
+Fonte: [c4-componentes.puml](c4-componentes.puml) · imagem gerada: [c4-componentes.svg](c4-componentes.svg)
+
+![Visão C4 de componentes do Serviço de Redistribuição](c4-componentes.svg)
+
+É o zoom no contêiner Serviço de Redistribuição da visão de contêineres. Os contêineres em volta (Broker, Banco, API, Monitoramento e Gateway) são os mesmos da seção 9, com os mesmos nomes e tecnologias. Nenhum contêiner ou tecnologia nova foi criada.
+
+| Componente | Responsabilidade | Na sequência |
+|---|---|---|
+| `ConsumidorEventos` | Recebe os eventos do RabbitMQ, descarta os já processados (`jaProcessado`) e só faz o ack depois de `marcarProcessado`. | `CON` |
+| `RedistribuicaoService` | Trata a missão original: interrompe, retoma, registra a falha, aplica a política e pede a substituta. | `RED` |
+| `PoliticaRedistribuicao` | `avaliarPolitica()`: missão em `Falha`, entrega não cancelada, prazo válido e menos de 3 redistribuições. | `POL` |
+| `ControleContinuidade` | Leva a substituta até o aceite: espera a carga ser liberada, faz até 3 tentativas de despacho e agenda a reavaliação. | `CONT` |
+| `SelecaoAGVService` | Elegibilidade (capacidade, rota, bateria com 20% de margem) e ordenação por ETA. | `SEL` |
+| `ReservaAGVService` | Reserva, confirmação e liberação do AGV. Libera reservas vencidas. | `RES` |
+| `AGVRepository` | Reserva atômica no PostgreSQL (`reservarSeDisponivel`, `confirmarSeAtiva`). | `AGVR` |
+| `EventoRepository` | Eventos processados e auditoria. | `EREP` |
+| `PublicadorEventos` | Publica `missao.reavaliar` com atraso. | `CONT -) BRK` |
+| Clientes REST | Implementam as interfaces `MissaoService`, `RotaService`, `NotificacaoService`, `MonitoramentoAGVService` e `AGVGateway`. | setas para `MIS`, `ROT`, `NOT`, `MON` e `GW` |
+
+Por que a divisão ficou assim:
+
+- **Um consumidor só para todos os eventos.** Na ADR 0001, um dos riscos era um consumidor novo esquecer de verificar se o evento já foi processado. Com o `ConsumidorEventos` na frente, todo evento passa pelo mesmo controle antes de chegar na regra de negócio.
+- **Seleção separada da reserva.** A seleção só lê e pode trabalhar com dados um pouco atrasados. A reserva é a única parte que grava o estado do AGV, então é ali que fica o controle de concorrência (ADR 0002).
+- **`RedistribuicaoService` separado do `ControleContinuidade`.** O primeiro termina quando a substituta está gravada e o evento de falha recebe ack. O segundo cuida da substituta, que pode ficar minutos esperando a carga ser liberada ou um AGV ficar livre.
+- **A `RegraContinuidade` fica na API.** Quem grava a `MissaoTransporte` e garante `UNIQUE(missao_origem_id)` é o `MissaoService`. O Serviço de Redistribuição só pede `criarMissaoSubstituta()`.
+
+## 11. ADR 0001
 
 Documento completo: [docs/adr/0001-redistribuicao-mensageria-rabbitmq.md](../../adr/0001-redistribuicao-mensageria-rabbitmq.md)
 
@@ -644,7 +675,7 @@ Alternativas descartadas: REST síncrono com polling (perde eventos quando um se
 
 As principais consequências são a consistência eventual no painel, o RabbitMQ como ponto crítico (precisa de cluster) e a limpeza periódica da tabela de eventos processados.
 
-## 11. Matriz de rastreabilidade
+## 12. Matriz de rastreabilidade
 
 | Passo / evento | Operação | Sequência | Atividades | Estados | C4 | ADR |
 |---|---|---|---|---|---|---|
@@ -665,7 +696,7 @@ As principais consequências são a consistência eventual no painel, o RabbitMQ
 | Recusa ou timeout | `liberarAtribuicao`, `liberarReserva` | `else` do aceite | "aceite recebido?" [não] | `Atribuida → AguardandoAtribuicao` | Redistribuição → API | aceite atrasado descartado |
 | Resultado | `registrarAuditoria`, `notificarOperador` | `alt` final | 3º Fork/Join | estado final da S-101 | API → Web (WebSocket) | auditoria |
 
-## 12. Como visualizar e validar
+## 13. Como visualizar e validar
 
 **No GitHub:** os blocos Mermaid deste README aparecem renderizados. Os diagramas PlantUML aparecem pelos SVGs gerados a partir dos `.puml`.
 
@@ -687,7 +718,7 @@ No VS Code também dá para ver usando as extensões *Markdown Preview Mermaid S
 
 Sempre que um `.puml` mudar, o `.svg` correspondente precisa ser gerado de novo e commitado junto.
 
-## 13. Considerações finais
+## 14. Considerações finais
 
 O ponto que mais influenciou a modelagem foi a regra de não reaproveitar a missão que falhou. Ela fez a máquina de estados ficar com `Falha` como estado final e obrigou a ter uma missão substituta com identidade própria, o que por sua vez trouxe a necessidade de garantir que só exista uma substituta por original.
 
