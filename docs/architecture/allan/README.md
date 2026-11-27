@@ -17,7 +17,7 @@ Aluno: Allan Camargo
 9. [Visão C4 de contêineres](#9-visão-c4-de-contêineres)
 10. [Visão C4 de componentes](#10-visão-c4-de-componentes)
 11. [Diagrama de classes e interfaces](#11-diagrama-de-classes-e-interfaces)
-12. [ADR 0001](#12-adr-0001)
+12. [ADRs](#12-adrs)
 13. [Matriz de rastreabilidade](#13-matriz-de-rastreabilidade)
 14. [Como visualizar e validar](#14-como-visualizar-e-validar)
 15. [Considerações finais](#15-considerações-finais)
@@ -56,7 +56,8 @@ A entidade principal é a `MissaoTransporte`. A transição crítica é **`Inter
 ```text
 docs/
 ├── adr/
-│   └── 0001-redistribuicao-mensageria-rabbitmq.md   ADR da mensageria
+│   ├── 0001-redistribuicao-mensageria-rabbitmq.md   ADR da mensageria
+│   └── 0002-redistribuicao-reserva-atomica-agv.md   ADR da reserva atômica de AGVs
 └── architecture/
     └── allan/
         ├── README.md            este documento
@@ -773,17 +774,35 @@ Cada pacote é um contêiner do C4. O diagrama mostra só o que a redistribuiç�
 
 As mensagens MQTT entre o AGV e o Gateway (`telemetria`, `status`, `aceite`, `ordem de missão`) são tópicos do dispositivo e não viram métodos.
 
-## 12. ADR 0001
+## 12. ADRs
+
+### ADR 0001 — mensageria
 
 Documento completo: [docs/adr/0001-redistribuicao-mensageria-rabbitmq.md](../../adr/0001-redistribuicao-mensageria-rabbitmq.md)
 
 **Decisão:** usar RabbitMQ (AMQP) entre os serviços e MQTT/TLS só entre os AGVs e o Gateway, com filas duráveis e ack manual depois da gravação no banco.
 
-A entrega das mensagens é **pelo menos uma vez**, não exatamente uma vez. O efeito único é obtido no banco com cinco mecanismos que aparecem nos diagramas: deduplicação por `eventoId`, lock otimista na missão, `UNIQUE(missao_origem_id)`, reserva por `UPDATE` condicional e `comandoId` para descartar aceite atrasado.
+A entrega das mensagens é **pelo menos uma vez**, não exatamente uma vez. O efeito único é obtido no banco com cinco mecanismos que aparecem nos diagramas: controle de eventos processados por `eventoId`, lock otimista na missão, `UNIQUE(missao_origem_id)`, reserva por `UPDATE` condicional e `comandoId` para descartar aceite atrasado.
 
 Alternativas descartadas: REST síncrono com polling (perde eventos quando um serviço cai), Kafka (pesado de operar para esse tamanho de frota e sem dead-letter e reentrega com atraso nativos) e um broker MQTT para tudo (sem fila durável por consumidor com ack manual).
 
 As principais consequências são a consistência eventual no painel, o RabbitMQ como ponto crítico (precisa de cluster) e a limpeza periódica da tabela de eventos processados.
+
+Na revisão desta entrega, o evento passou a ser marcado como processado no fim, e não no começo. Antes, uma queda no meio do processamento fazia o evento reentregue ser descartado como repetido.
+
+### ADR 0002 — reserva atômica de AGVs
+
+Documento completo: [docs/adr/0002-redistribuicao-reserva-atomica-agv.md](../../adr/0002-redistribuicao-reserva-atomica-agv.md)
+
+**Problema:** duas redistribuições ao mesmo tempo podem escolher o mesmo AGV, porque a seleção só lê e demora (uma rota por candidato).
+
+**Decisão:** a reserva é um `UPDATE agv SET estado = 'RESERVADO' WHERE id = ? AND estado = 'DISPONIVEL'` seguido do `INSERT` da reserva, na mesma transação. Índices únicos parciais garantem no máximo uma reserva `ATIVA` ou `CONFIRMADA` por AGV e por missão. A confirmação também é condicional e acontece antes do aceite da missão.
+
+Alternativas descartadas: bloqueio pessimista (seguraria o bloqueio durante a seleção ou faria o mesmo com mais idas ao banco), controle otimista na linha do AGV (a telemetria muda a versão a cada 2 s) e lock distribuído (tecnologia nova para algo que o PostgreSQL já resolve).
+
+A deduplicação e a reserva resolvem problemas diferentes: a primeira evita aplicar o mesmo evento duas vezes, a segunda evita que eventos diferentes peguem o mesmo AGV.
+
+Onde aparece: `ReservaAGVService` e `AGVRepository` no C4 nível 3 e nas classes, o `loop` de reserva e a confirmação antes do aceite na sequência, a guarda `confirmarSeAtiva() = true` na máquina de estados.
 
 ## 13. Matriz de rastreabilidade
 

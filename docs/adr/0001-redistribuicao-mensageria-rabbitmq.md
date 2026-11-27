@@ -29,10 +29,10 @@ Usar comunicação orientada a eventos com **RabbitMQ** (AMQP 0-9-1) entre os se
 
 Como a entrega é **pelo menos uma vez** (at-least-once), o processamento precisa ser idempotente. Isso fica no banco, não no broker:
 
-1. **Eventos repetidos:** antes de processar, o serviço chama `registrarSeNovo(eventoId)`, que faz um `INSERT ... ON CONFLICT DO NOTHING` na tabela de eventos processados. Se o id já existe, o evento é descartado e confirmado.
+1. **Eventos repetidos:** antes de processar, o `ConsumidorEventos` chama `jaProcessado(eventoId)`. Se o id já está na tabela de eventos processados, o evento é descartado e confirmado. O id só é gravado no fim, com `marcarProcessado(eventoId)` (`INSERT ... ON CONFLICT DO NOTHING`), logo antes do ack.
 2. **Mudança de estado da missão:** toda gravação usa lock otimista (`salvar(missao, versaoEsperada)`). Se outra operação mudou a missão antes, a gravação falha e o evento é reavaliado com o estado atual.
 3. **Missão substituta única:** a coluna `missao_origem_id` tem restrição `UNIQUE`. Reprocessar o mesmo evento devolve a substituta que já existe em vez de criar outra.
-4. **Reserva de AGV:** `reservarSeDisponivel()` é um `UPDATE` condicional que só reserva se o AGV ainda estiver `DISPONIVEL`. Duas redistribuições concorrentes não conseguem pegar o mesmo AGV; a que perde tenta o próximo candidato.
+4. **Reserva de AGV:** `reservarSeDisponivel()` é um `UPDATE` condicional que só reserva se o AGV ainda estiver `DISPONIVEL`. Duas redistribuições concorrentes não conseguem pegar o mesmo AGV; a que perde tenta o próximo candidato. Os detalhes estão na [ADR 0002](0002-redistribuicao-reserva-atomica-agv.md).
 5. **Aceite atrasado:** cada ordem tem um `comandoId`. Se o aceite chega depois do timeout de 30 s, o comando já foi invalidado e o aceite é ignorado.
 
 Com isso, o efeito final no banco é o mesmo de um processamento único, mesmo que a mensagem chegue mais de uma vez. Não existe garantia de entrega exatamente uma vez no transporte; o que existe é deduplicação e controle de concorrência na hora de gravar.
@@ -57,7 +57,7 @@ Mensagens que falham repetidamente vão para uma **dead-letter queue**. Quando n
 **Negativas e riscos**
 
 - O sistema passa a ter consistência eventual: por alguns segundos o painel pode mostrar um estado anterior ao real.
-- A idempotência depende de todo consumidor chamar `registrarSeNovo()` e usar lock otimista. Um consumidor novo que esqueça isso pode duplicar efeitos.
+- A idempotência depende de todo evento passar pelo controle de eventos processados e de as operações usarem lock otimista. Para diminuir esse risco, todos os eventos do Serviço de Redistribuição entram pelo mesmo `ConsumidorEventos` (C4 nível 3).
 - O RabbitMQ vira um componente crítico. Precisa rodar em cluster com filas quorum, senão a falha dele para a detecção.
 - A tabela de eventos processados cresce sem parar e precisa de uma rotina de limpeza (por exemplo, apagar ids com mais de 7 dias).
 - Depurar um fluxo assíncrono é mais difícil que um fluxo síncrono, porque a sequência de passos fica espalhada entre serviços.
@@ -67,3 +67,7 @@ Mensagens que falham repetidamente vão para uma **dead-letter queue**. Quando n
 - Mais um serviço para manter (RabbitMQ), além do Gateway de Comunicação.
 - Precisamos acompanhar: tamanho das filas, mensagens na dead-letter, tempo entre a falha confirmada e o aceite do substituto, quantidade de missões em `SemCandidato` e taxa de reentrega de mensagens.
 - Os eventos precisam carregar um id de correlação (o id da missão original) para que os logs dos serviços possam ser cruzados.
+
+## Revisão de 2026-11-27
+
+Na primeira versão, o evento era registrado como processado no começo (`registrarSeNovo`). Se o serviço caísse depois desse registro e antes de terminar, o RabbitMQ entregaria o evento de novo, mas ele seria descartado como repetido, e a falha ficaria sem tratamento. Agora o registro acontece no fim (`marcarProcessado`), e as operações da API são idempotentes para aguentar o reprocessamento. A decisão de usar RabbitMQ não mudou.
