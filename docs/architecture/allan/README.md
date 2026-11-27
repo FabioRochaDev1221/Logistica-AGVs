@@ -558,10 +558,14 @@ O diagrama tem quatro raias: AGV / Comunicação, Monitoramento e Detecção, Ge
 Os três pares de Fork/Join foram usados só onde as atividades realmente rodam ao mesmo tempo:
 
 1. **Interromper a missão || tentar contato com o AGV.** São serviços diferentes reagindo ao mesmo evento. O Join é obrigatório porque a decisão "retomar ou falhar" precisa da missão já em `Interrompida` e do resultado das tentativas.
-2. **Calcular rota || verificar bateria e capacidade.** O cálculo de rota é uma chamada remota e a verificação é local. Nenhuma depende da outra, e o descarte só pode acontecer com as duas prontas.
+2. **Avaliação de cada candidato.** A avaliação de um AGV não depende da avaliação de outro, então as chamadas ao `RotaService` podem ser feitas ao mesmo tempo. O diagrama mostra o candidato 1 e o candidato N, mas é um ramo por AGV listado. Dentro de cada ramo a ordem é fixa: a bateria só pode ser verificada depois da rota, porque depende da energia estimada. A capacidade é verificada antes do Fork, porque é local e evita calcular rota para um AGV que não carrega o peso. O Join é necessário porque a ordenação por ETA precisa de todos os resultados.
 3. **Registrar auditoria || notificar operador.** As duas são independentes. A notificação já é assíncrona no diagrama de sequência.
 
 As decisões têm guardas `[sim]`/`[não]` sobre uma mesma condição, então são mutuamente exclusivas. A escolha do candidato e a reserva ficam dentro de um mesmo `repeat`, com no máximo 3 tentativas de despacho, igual ao `loop` da sequência.
+
+Na versão anterior, o segundo Fork colocava "calcular rota" em paralelo com "verificar bateria e capacidade". Isso estava errado, porque a verificação da bateria usa a energia estimada que vem da rota. Separei a capacidade (antes do Fork) da bateria (depois da rota, no mesmo ramo).
+
+As raias são responsabilidades, não contêineres. "Gestão de Missões" junta o que o Serviço de Redistribuição e a API fazem com a missão. Os nomes das operações em cada ação são os mesmos da sequência e do diagrama de classes.
 
 ## 8. Diagrama de estados
 
