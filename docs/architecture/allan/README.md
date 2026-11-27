@@ -16,10 +16,11 @@ Aluno: Allan Camargo
 8. [Diagrama de estados](#8-diagrama-de-estados)
 9. [Visão C4 de contêineres](#9-visão-c4-de-contêineres)
 10. [Visão C4 de componentes](#10-visão-c4-de-componentes)
-11. [ADR 0001](#11-adr-0001)
-12. [Matriz de rastreabilidade](#12-matriz-de-rastreabilidade)
-13. [Como visualizar e validar](#13-como-visualizar-e-validar)
-14. [Considerações finais](#14-considerações-finais)
+11. [Diagrama de classes e interfaces](#11-diagrama-de-classes-e-interfaces)
+12. [ADR 0001](#12-adr-0001)
+13. [Matriz de rastreabilidade](#13-matriz-de-rastreabilidade)
+14. [Como visualizar e validar](#14-como-visualizar-e-validar)
+15. [Considerações finais](#15-considerações-finais)
 
 ## 1. Problema
 
@@ -66,7 +67,9 @@ docs/
         ├── c4-containers.puml   C4 nível 2 (fonte)
         ├── c4-containers.svg    C4 nível 2 (gerado)
         ├── c4-componentes.puml  C4 nível 3 do Serviço de Redistribuição (fonte)
-        └── c4-componentes.svg   C4 nível 3 (gerado)
+        ├── c4-componentes.svg   C4 nível 3 (gerado)
+        ├── classes.puml         classes e interfaces da redistribuição (fonte)
+        └── classes.svg          classes e interfaces (gerado)
 ```
 
 Os diagramas ficam em `docs/architecture/allan/` e as ADRs em `docs/adr/`, como o professor pediu para a avaliação final.
@@ -663,7 +666,63 @@ Por que a divisão ficou assim:
 - **`RedistribuicaoService` separado do `ControleContinuidade`.** O primeiro termina quando a substituta está gravada e o evento de falha recebe ack. O segundo cuida da substituta, que pode ficar minutos esperando a carga ser liberada ou um AGV ficar livre.
 - **A `RegraContinuidade` fica na API.** Quem grava a `MissaoTransporte` e garante `UNIQUE(missao_origem_id)` é o `MissaoService`. O Serviço de Redistribuição só pede `criarMissaoSubstituta()`.
 
-## 11. ADR 0001
+## 11. Diagrama de classes e interfaces
+
+Fonte: [classes.puml](classes.puml) · imagem gerada: [classes.svg](classes.svg)
+
+![Diagrama de classes e interfaces da redistribuição](classes.svg)
+
+Cada pacote é um contêiner do C4. O diagrama mostra só o que a redistribuição usa. Os campos de cada DTO estão na seção 5.
+
+**Onde usei interface e onde não usei**
+
+- **Nas fronteiras entre serviços:** `MissaoService`, `RotaService`, `NotificacaoService`, `MonitoramentoAGVService` e `AGVGateway`. O Serviço de Redistribuição depende só da interface, e quem implementa do lado dele é o componente Clientes REST. Se a forma de chamar outro serviço mudar, a regra de negócio não muda.
+- **Na persistência e no broker:** `AGVRepository`, `EventoRepository`, `MissaoRepository` e `PublicadorEventos`. A lógica não depende do SQL nem do `RabbitTemplate`.
+- **`PoliticaRedistribuicao`, `ControleContinuidade`, `SelecaoAGVService` e `ReservaAGVService` são classes concretas.** Cada uma tem uma implementação só, e uma interface ali não diminuiria o acoplamento. Pelo mesmo motivo não usei Strategy para a política.
+
+**Relacionamentos**
+
+- `-->` associação: o serviço guarda uma referência para outro objeto do mesmo contêiner (injeção de dependência).
+- `..>` dependência: uso de uma interface de outro contêiner ou criação de um objeto (`RegraContinuidade` cria a substituta).
+- `..|>` realização: `MissaoServiceImpl` implementa `MissaoService`.
+- `<|--` herança: todos os eventos estendem `EventoMissao`, que tem o `eventoId` usado para descartar repetições.
+
+**Multiplicidades**
+
+- `MissaoTransporte` origem `0..1` com `0..1` substituta: uma missão tem no máximo uma substituta (I4), e a primeira missão da entrega não tem origem.
+- `AGV` `1` com `0..*` `ReservaAGV`, e `MissaoTransporte` `1` com `0..*` `ReservaAGV`: cada tentativa de despacho gera uma reserva, mas só uma pode estar `ATIVA` ou `CONFIRMADA` por AGV e por missão (I2, ADR 0002).
+- `MissaoTransporte` `0..*` com `0..1` `AGV`: a missão só tem AGV depois de `atribuirAGV()`.
+
+**Visibilidade e regras na própria classe**
+
+- Os atributos das entidades são privados. O estado só muda pelos métodos (`interromper`, `registrarFalha`, `atribuir`...), que conferem se a transição existe na máquina de estados. Não existe método que tire uma missão de `Falha`, e `estaEncerrada()` devolve `true` para `Falha`, `Concluida` e `Cancelada`.
+- A `RegraContinuidade` só aceita uma original em `Falha`. A substituta recebe id próprio, `missaoOrigemId`, `redistribuicoes + 1` e `cargaLiberada = false` quando a carga estava no AGV que falhou. Isso é o que coloca a substituta em `BloqueadaPorCarga`.
+- `atribuir()` gera o `comandoIdAtivo`, que vai na ordem para o AGV. `liberarAtribuicao()` apaga esse valor, por isso um aceite atrasado não encontra o comando.
+- Eventos e DTOs têm campos públicos porque só carregam dados.
+
+**Métodos da sequência e onde estão**
+
+| Mensagem no diagrama de sequência | Classe ou interface |
+|---|---|
+| `onTelemetria`, `verificarHeartbeats`, `listarAGVsAptos` | `MonitoramentoAGVService` |
+| `solicitarStatus`, `enviarOrdemMissao` | `AGVGateway` |
+| `jaProcessado`, `marcarProcessado`, `registrarAuditoria` | `EventoRepository` |
+| `onInterrupcaoSuspeita`, `onAgvRecuperado`, `onFalhaConfirmada` | `RedistribuicaoService` |
+| `avaliarPolitica` | `PoliticaRedistribuicao` |
+| `continuarEntrega`, `onCargaLiberada`, `onAceiteMissao` | `ControleContinuidade` |
+| `selecionarCandidatos` | `SelecaoAGVService` |
+| `reservarAGV`, `confirmarReserva`, `liberarReserva` | `ReservaAGVService` |
+| `reservarSeDisponivel`, `confirmarSeAtiva` | `AGVRepository` |
+| `interromperMissao`, `retomarMissao`, `registrarFalha`, `criarMissaoSubstituta`, `confirmarRecuperacaoCarga`, `atribuirAGV`, `confirmarAceite`, `liberarAtribuicao` | `MissaoService` |
+| `salvar`, `buscarSubstitutaDe` | `MissaoRepository` |
+| `calcularRota` | `RotaService` |
+| `notificarOperador` | `NotificacaoService` |
+| `publicar("missao.reavaliar", ...)` | `PublicadorEventos` |
+| `publicar(...)` do Monitoramento, do Gateway e da API, e `ack(...)` | operações do RabbitMQ, fora do Serviço de Redistribuição |
+
+As mensagens MQTT entre o AGV e o Gateway (`telemetria`, `status`, `aceite`, `ordem de missão`) são tópicos do dispositivo e não viram métodos.
+
+## 12. ADR 0001
 
 Documento completo: [docs/adr/0001-redistribuicao-mensageria-rabbitmq.md](../../adr/0001-redistribuicao-mensageria-rabbitmq.md)
 
@@ -675,7 +734,7 @@ Alternativas descartadas: REST síncrono com polling (perde eventos quando um se
 
 As principais consequências são a consistência eventual no painel, o RabbitMQ como ponto crítico (precisa de cluster) e a limpeza periódica da tabela de eventos processados.
 
-## 12. Matriz de rastreabilidade
+## 13. Matriz de rastreabilidade
 
 | Passo / evento | Operação | Sequência | Atividades | Estados | C4 | ADR |
 |---|---|---|---|---|---|---|
@@ -696,7 +755,7 @@ As principais consequências são a consistência eventual no painel, o RabbitMQ
 | Recusa ou timeout | `liberarAtribuicao`, `liberarReserva` | `else` do aceite | "aceite recebido?" [não] | `Atribuida → AguardandoAtribuicao` | Redistribuição → API | aceite atrasado descartado |
 | Resultado | `registrarAuditoria`, `notificarOperador` | `alt` final | 3º Fork/Join | estado final da S-101 | API → Web (WebSocket) | auditoria |
 
-## 13. Como visualizar e validar
+## 14. Como visualizar e validar
 
 **No GitHub:** os blocos Mermaid deste README aparecem renderizados. Os diagramas PlantUML aparecem pelos SVGs gerados a partir dos `.puml`.
 
@@ -718,7 +777,7 @@ No VS Code também dá para ver usando as extensões *Markdown Preview Mermaid S
 
 Sempre que um `.puml` mudar, o `.svg` correspondente precisa ser gerado de novo e commitado junto.
 
-## 14. Considerações finais
+## 15. Considerações finais
 
 O ponto que mais influenciou a modelagem foi a regra de não reaproveitar a missão que falhou. Ela fez a máquina de estados ficar com `Falha` como estado final e obrigou a ter uma missão substituta com identidade própria, o que por sua vez trouxe a necessidade de garantir que só exista uma substituta por original.
 
