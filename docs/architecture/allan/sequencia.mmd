@@ -11,8 +11,12 @@ sequenceDiagram
         participant MON as MonitoramentoAGVService
     end
     box transparent Serviço de Redistribuição
+        participant CON as ConsumidorEventos
         participant RED as RedistribuicaoService
+        participant POL as PoliticaRedistribuicao
+        participant CONT as ControleContinuidade
         participant SEL as SelecaoAGVService
+        participant RES as ReservaAGVService
         participant AGVR as AGVRepository
         participant EREP as EventoRepository
     end
@@ -42,18 +46,23 @@ sequenceDiagram
     end
 
     MON -) BRK: publicar("missao.interrupcao-suspeita", InterrupcaoSuspeitaEvent)
-    BRK -) RED: onInterrupcaoSuspeita(InterrupcaoSuspeitaEvent)
-    RED ->>+ EREP: registrarSeNovo(eventoId)
-    EREP -->>- RED: boolean novo
-    alt novo = false (evento reentregue pelo broker)
-        RED --) BRK: ack(InterrupcaoSuspeitaEvent) sem reprocessar
-    else novo = true
+    BRK -) CON: InterrupcaoSuspeitaEvent
+    CON ->>+ EREP: jaProcessado(eventoId)
+    EREP -->>- CON: boolean processado
+    alt processado = true (evento reentregue pelo broker)
+        CON --) BRK: ack(InterrupcaoSuspeitaEvent) sem reprocessar
+    else processado = false
+        CON ->> RED: onInterrupcaoSuspeita(InterrupcaoSuspeitaEvent)
         RED ->>+ MIS: interromperMissao(M-100, MotivoInterrupcaoDTO)
         MIS ->>+ MREP: salvar(M-100, versaoEsperada)
         MREP -->>- MIS: MissaoTransporte [versao + 1]
         MIS -->>- RED: MissaoDTO [M-100, estado = Interrompida]
-        RED --) BRK: ack(InterrupcaoSuspeitaEvent)
+        RED -->> CON: void
+        CON ->>+ EREP: marcarProcessado(eventoId)
+        EREP -->>- CON: void
+        CON --) BRK: ack(InterrupcaoSuspeitaEvent)
     end
+    Note over CON,EREP: Todo evento consumido passa por jaProcessado(),<br/>marcarProcessado() e só então recebe ack
 
     Note over MON,GW: Tolerância: até 3 tentativas de contato, timeout de 2 s cada
     loop tentativa = 1..3, enquanto não houver resposta
@@ -68,85 +77,101 @@ sequenceDiagram
     end
 
     break AGV respondeu operacional e sem falha (falha transitória)
-        Note over MON,MIS: Mesmo AGV retoma M-100 (retomarMissao), sem redistribuição
+        MON -) BRK: publicar("agv.recuperado", AgvRecuperadoEvent)
+        BRK -) CON: AgvRecuperadoEvent
+        CON ->> RED: onAgvRecuperado(AgvRecuperadoEvent)
+        RED ->> MIS: retomarMissao(M-100)
+        MIS -->> RED: MissaoDTO [M-100, estado = EmExecucao]
+        Note over RED,MIS: Mesmo AGV retoma M-100, sem redistribuição
     end
 
     MON -) BRK: publicar("agv.falha-confirmada", FalhaConfirmadaEvent)
-    BRK -) RED: onFalhaConfirmada(FalhaConfirmadaEvent)
-    RED ->>+ EREP: registrarSeNovo(eventoId)
-    EREP -->>- RED: boolean novo
-    break novo = false (evento duplicado)
-        RED --) BRK: ack(FalhaConfirmadaEvent) sem reprocessar
+    BRK -) CON: FalhaConfirmadaEvent
+    CON ->>+ EREP: jaProcessado(eventoId)
+    EREP -->>- CON: boolean processado
+    break processado = true (evento duplicado)
+        CON --) BRK: ack(FalhaConfirmadaEvent) sem reprocessar
     end
 
+    CON ->> RED: onFalhaConfirmada(FalhaConfirmadaEvent)
     RED ->>+ MIS: registrarFalha(M-100, FalhaDTO)
     MIS ->>+ MREP: salvar(M-100, versaoEsperada)
     MREP -->>- MIS: MissaoTransporte [versao + 1]
     MIS -->>- RED: MissaoDTO [M-100, estado = Falha, cargaEmbarcada]
     Note over MIS: AGV-07 perde a responsabilidade pela entrega
 
-    RED ->> RED: avaliarPolitica(MissaoDTO)
-    RED -->> RED: DecisaoRedistribuicaoDTO
+    RED ->>+ POL: avaliarPolitica(MissaoDTO)
+    POL -->>- RED: DecisaoRedistribuicaoDTO
     break permitida = false (entrega cancelada, prazo expirado ou 3 redistribuições)
+        RED ->> EREP: registrarAuditoria(AuditoriaDTO [sem redistribuição])
         RED -) NOT: notificarOperador(NotificacaoDTO [tratamento manual])
         NOT -) WEB: alerta [WebSocket]
-        RED --) BRK: ack(FalhaConfirmadaEvent)
+        RED -->> CON: void
+        CON ->> EREP: marcarProcessado(eventoId)
+        CON --) BRK: ack(FalhaConfirmadaEvent)
     end
 
     RED ->>+ MIS: criarMissaoSubstituta(M-100)
     MIS ->>+ MREP: buscarSubstitutaDe(M-100)
     MREP -->>- MIS: vazio (ou S-101 já existente, devolvida sem criar outra)
-    MIS ->>+ MREP: salvar(S-101 com missaoOrigemId = M-100, versao 0)
+    Note over MIS: RegraContinuidade cria S-101 com id próprio,<br/>missaoOrigemId = M-100 e cargaLiberada = false se a carga está no AGV-07
+    MIS ->>+ MREP: salvar(S-101, versao 0)
     MREP -->>- MIS: MissaoTransporte [S-101]
     MIS -->>- RED: MissaoDTO [S-101, estado = AguardandoAtribuicao, missaoOrigemId = M-100]
     Note over MIS,MREP: UNIQUE(missao_origem_id): no máximo uma substituta por missão original
-    RED --) BRK: ack(FalhaConfirmadaEvent)
+    RED -) CONT: continuarEntrega(MissaoDTO [S-101])
+    RED -->> CON: void
+    CON ->>+ EREP: marcarProcessado(eventoId)
+    EREP -->>- CON: void
+    CON --) BRK: ack(FalhaConfirmadaEvent)
 
-    opt cargaEmbarcada = true (carga está fisicamente no AGV-07)
-        RED -) NOT: notificarOperador(NotificacaoDTO [recuperação de carga necessária])
+    opt cargaLiberada = false (carga está fisicamente no AGV-07)
+        CONT -) NOT: notificarOperador(NotificacaoDTO [recuperação de carga necessária])
         NOT -) WEB: alerta [WebSocket]
         WEB -->> OP: S-101 bloqueada até transferência segura
         OP ->> WEB: confirma transferência da carga
         WEB ->>+ MIS: confirmarRecuperacaoCarga(S-101, ConfirmacaoCargaDTO)
         MIS -->>- WEB: MissaoDTO [S-101, cargaLiberada = true]
         MIS -) BRK: publicar("missao.carga-liberada", CargaLiberadaEvent)
-        BRK -) RED: onCargaLiberada(CargaLiberadaEvent)
+        BRK -) CON: CargaLiberadaEvent
+        CON ->> CONT: onCargaLiberada(CargaLiberadaEvent)
     end
 
     loop tentativa de despacho = 1..3, até o aceite
-        RED ->>+ SEL: selecionarCandidatos(CriterioSelecaoDTO)
+        CONT ->>+ SEL: selecionarCandidatos(CriterioSelecaoDTO)
         SEL ->>+ MON: listarAGVsAptos(FiltroAGVDTO)
         MON -->>- SEL: AGVStatusDTO[] [DISPONIVEL, sem falha ativa]
-        loop para cada AGV listado
+        Note over SEL: Descarta AGV com capacidade menor que o peso
+        loop para cada AGV restante (chamadas em paralelo)
             SEL ->>+ ROT: calcularRota(posicaoAGV, pontoColeta, destino)
             ROT -->>- SEL: RotaDTO [viavel, distancia, energiaEstimada]
         end
-        Note over SEL: Descarta se rota inviável, capacidade menor que o peso<br/>ou bateria menor que energiaEstimada + 20%
-        SEL -->>- RED: CandidatoDTO[] ordenados por ETA
+        Note over SEL: Descarta rota inviável ou bateria menor que energiaEstimada + 20%
+        SEL -->>- CONT: CandidatoDTO[] ordenados por ETA
 
-        RED ->>+ SEL: reservarAGV(CandidatoDTO[], S-101)
+        CONT ->>+ RES: reservarAGV(CandidatoDTO[], S-101)
         loop para cada candidato, até obter a reserva
-            SEL ->>+ AGVR: reservarSeDisponivel(agvId, S-101, ttl = 30 s)
-            AGVR -->>- SEL: boolean reservado
+            RES ->>+ AGVR: reservarSeDisponivel(reservaId, agvId, S-101, ttl = 30 s)
+            AGVR -->>- RES: boolean reservado
             opt reservado = false
-                Note over SEL,AGVR: Outro processo reservou o AGV antes, tenta o próximo
+                Note over RES,AGVR: Outro processo reservou o AGV antes, tenta o próximo
             end
         end
-        SEL -->>- RED: ReservaDTO [AGV-12] ou vazio
+        RES -->>- CONT: ReservaDTO [AGV-12] ou vazio
 
         break ReservaDTO vazio (nenhum AGV elegível ou todos já reservados)
-            RED -) NOT: notificarOperador(NotificacaoDTO [sem AGV substituto])
+            CONT -) NOT: notificarOperador(NotificacaoDTO [sem AGV substituto])
             NOT -) WEB: alerta [WebSocket]
-            RED -) BRK: publicar("missao.reavaliar", S-101, atraso = 60 s)
+            CONT -) BRK: publicar("missao.reavaliar", ReavaliarMissaoEvent [S-101], atraso = 60 s)
         end
 
-        RED ->>+ MIS: atribuirAGV(S-101, AGV-12, reservaId)
+        CONT ->>+ MIS: atribuirAGV(S-101, AGV-12, reservaId)
         MIS ->>+ MREP: salvar(S-101, versaoEsperada)
         MREP -->>- MIS: MissaoTransporte [versao + 1]
-        MIS -->>- RED: MissaoDTO [S-101, estado = Atribuida]
+        MIS -->>- CONT: MissaoDTO [S-101, estado = Atribuida, comandoId]
 
-        RED ->>+ GW: enviarOrdemMissao(OrdemMissaoDTO)
-        GW -->>- RED: EnvioDTO [comandoId]
+        CONT ->>+ GW: enviarOrdemMissao(OrdemMissaoDTO [comandoId])
+        GW -->>- CONT: EnvioDTO [comandoId]
         loop reenvio enquanto não houver PUBACK do AGV (máx. 3)
             GW -) AGV2: ordem de missão S-101 [MQTT, QoS 1]
         end
@@ -154,29 +179,32 @@ sequenceDiagram
         alt AGV-12 aceita em até 30 s
             AGV2 -) GW: aceite(comandoId) [MQTT]
             GW -) BRK: publicar("missao.aceite", AceiteMissaoDTO)
-            BRK -) RED: onAceiteMissao(AceiteMissaoDTO)
-            RED ->>+ MIS: confirmarAceite(S-101, AceiteMissaoDTO)
-            MIS -->>- RED: MissaoDTO [S-101, estado = EmExecucao]
-            RED ->>+ SEL: confirmarReserva(reservaId)
-            SEL -->>- RED: ReservaDTO [CONFIRMADA]
+            BRK -) CON: AceiteMissaoDTO
+            CON ->> CONT: onAceiteMissao(AceiteMissaoDTO)
+            CONT ->>+ RES: confirmarReserva(reservaId)
+            RES ->>+ AGVR: confirmarSeAtiva(reservaId)
+            AGVR -->>- RES: boolean confirmada
+            RES -->>- CONT: ReservaDTO [CONFIRMADA]
+            CONT ->>+ MIS: confirmarAceite(S-101, AceiteMissaoDTO)
+            MIS -->>- CONT: MissaoDTO [S-101, estado = EmExecucao]
         else Recusa, timeout de aceite ou erro de comunicação
-            RED ->>+ MIS: liberarAtribuicao(S-101, motivo)
-            MIS -->>- RED: MissaoDTO [S-101, estado = AguardandoAtribuicao]
-            RED ->>+ SEL: liberarReserva(reservaId)
-            SEL -->>- RED: void
-            Note over RED: Aceite que chegar depois é descartado (comandoId já invalidado)
+            CONT ->>+ MIS: liberarAtribuicao(S-101, motivo)
+            MIS -->>- CONT: MissaoDTO [S-101, estado = AguardandoAtribuicao]
+            CONT ->>+ RES: liberarReserva(reservaId)
+            RES -->>- CONT: void
+            Note over CONT: Aceite que chegar depois é descartado:<br/>a reserva já foi liberada e o comandoId apagado
         end
     end
 
     alt S-101 em EmExecucao
-        RED ->>+ EREP: registrarAuditoria(AuditoriaDTO [M-100 para S-101, AGV-07 para AGV-12])
-        EREP -->>- RED: void
-        RED -) NOT: notificarOperador(NotificacaoDTO [missão redistribuída])
+        CONT ->>+ EREP: registrarAuditoria(AuditoriaDTO [M-100 para S-101, AGV-07 para AGV-12])
+        EREP -->>- CONT: void
+        CONT -) NOT: notificarOperador(NotificacaoDTO [missão redistribuída])
         NOT -) WEB: atualização [WebSocket]
         WEB -->> OP: painel mostra M-100 em Falha e S-101 em execução
     else 3 tentativas sem aceite
-        RED ->>+ EREP: registrarAuditoria(AuditoriaDTO [redistribuição sem sucesso])
-        EREP -->>- RED: void
-        RED -) NOT: notificarOperador(NotificacaoDTO [tratamento manual de S-101])
+        CONT ->>+ EREP: registrarAuditoria(AuditoriaDTO [redistribuição sem sucesso])
+        EREP -->>- CONT: void
+        CONT -) NOT: notificarOperador(NotificacaoDTO [tratamento manual de S-101])
         NOT -) WEB: alerta [WebSocket]
     end
