@@ -675,7 +675,7 @@ Fonte: [c4-containers.puml](c4-containers.puml) · imagem gerada: [c4-containers
 | Interface Web de Monitoramento | React, TypeScript | Painel do operador. Recebe alertas por WebSocket. |
 | API de Gestão de Missões | Java 21, Spring Boot | Ciclo de vida da missão. Módulos `MissaoService`, `RotaService`, `NotificacaoService`. |
 | Serviço de Monitoramento de AGVs | Java 21, Spring Boot | Telemetria, heartbeat e confirmação de falha. |
-| Serviço de Redistribuição | Java 21, Spring Boot | Política, seleção, reserva e despacho. |
+| Serviço de Redistribuição | Java 21, Spring Boot | Política, continuidade, seleção, reserva e despacho. Componentes na seção 10. |
 | Gateway de Comunicação | Node.js, servidor MQTT (Aedes) | Conexão MQTT com os AGVs e tradução para eventos internos. |
 | Broker de Mensagens | RabbitMQ 3.13 | Filas duráveis, ack manual, dead-letter e mensagem com atraso. |
 | Banco de Dados | PostgreSQL 16 | Missões, AGVs e reservas, eventos processados e auditoria. |
