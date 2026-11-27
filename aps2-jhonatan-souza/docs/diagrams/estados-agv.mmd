@@ -1,0 +1,30 @@
+stateDiagram-v2
+    state "Disponível" as Disponivel
+    state "Em Trânsito" as EmTransito
+    state "Em Carregamento" as EmCarregamento
+    state "Em Falha Operacional" as EmFalhaOperacional
+
+    [*] --> Disponivel
+
+    Disponivel: entry / atualizarDisponibilidade()
+    EmTransito: do / executarRota()
+    EmCarregamento: entry / iniciarRecarga()
+    EmCarregamento: do / monitorarBateria()
+    EmCarregamento: exit / finalizarRecarga()
+    EmFalhaOperacional: entry / bloquearOperacao()
+
+    Disponivel --> EmTransito: despachoAutorizado [nivelPct >= 20 e rotaLivre] / iniciarDeslocamento()
+
+    EmTransito --> Disponivel: entregaConcluida / atualizarStatus()
+
+    Disponivel --> EmCarregamento: solicitarRecarga [nivelPct < 20] / encaminharRecarga()
+
+    EmCarregamento --> Disponivel: bateriaAtualizada [nivelPct >= 90] / liberarAGV()
+
+    EmTransito --> EmFalhaOperacional: falhaDetectada / interromperRota()
+    Disponivel --> EmFalhaOperacional: falhaDetectada / bloquearDespacho()
+    EmCarregamento --> EmFalhaOperacional: falhaDetectada / interromperRecarga()
+
+    EmFalhaOperacional --> Disponivel: reparoConcluido [nivelPct >= 20] / liberarAGV()
+
+    EmFalhaOperacional --> EmCarregamento: reparoConcluido [nivelPct < 20] / encaminharRecarga()

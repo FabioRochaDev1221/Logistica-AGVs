@@ -1,0 +1,24 @@
+C4Container
+    title Arquitetura C4 Nivel 2 - Logistica AGVs
+
+    Person(operador, "Operador", "Solicita entregas e acompanha os AGVs")
+
+    System_Boundary(sistema, "Sistema de Logistica AGVs") {
+        Container(interface, "Interface do Operador", "React / TypeScript", "Permite solicitar e acompanhar entregas")
+        Container(orquestrador, "Orquestrador de AGVs", "Node.js / TypeScript", "Coordena os AGVs e as entregas")
+        Container(despacho, "Serviço de Despacho", "Node.js / TypeScript", "Verifica rotas e executa o despacho")
+        Container(monitor, "Serviço de Monitoramento", "Node.js / TypeScript", "Consulta disponibilidade e nivel de bateria")
+        ContainerDb(banco, "Banco de Dados", "PostgreSQL", "Armazena AGVs, rotas e entregas")
+    }
+
+    System_Ext(agvs, "AGV", "Veiculos autonomos de transporte")
+
+    Rel(operador, interface, "Solicita entregas", "HTTPS")
+    Rel(interface, orquestrador, "Envia solicitacoes", "REST / HTTPS")
+    Rel(orquestrador, despacho, "Verifica rota e solicita despacho", "REST / HTTPS")
+    Rel(orquestrador, monitor, "Verifica nivel de bateria", "REST / HTTPS")
+    Rel(orquestrador, agvs, "Consulta disponibilidade", "MQTT")
+    Rel(orquestrador, agvs, "Solicita recarga", "MQTT")
+    Rel(despacho, agvs, "Envia rota e recebe confirmacao", "MQTT")
+    Rel(monitor, agvs, "Consulta nivel de bateria", "MQTT")
+    Rel(orquestrador, banco, "Consulta e registra entregas", "SQL / TCP")

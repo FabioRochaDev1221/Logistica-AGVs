@@ -1,0 +1,81 @@
+flowchart TD
+
+    subgraph OPERADOR["Raia 1 - Operador"]
+        A([Inicio])
+        B[Solicitar entrega]
+        F[Receber aviso de indisponibilidade]
+        R[Receber confirmacao de despacho]
+        T[Receber motivo do bloqueio]
+        Z([Fim])
+    end
+
+    subgraph SISTEMA["Raia 2 - Sistema Back-End"]
+        C[Orquestrador de AGVs recebe solicitacao]
+        D[Selecionar AGV]
+        E{AGV disponivel?}
+
+        FORK[[FORK - Iniciar verificacoes paralelas]]
+
+        G[Servico de Monitoramento verifica bateria]
+        H[Servico de Despacho verifica rota]
+
+        I{Nivel de bateria >= 20%?}
+        J{Rota livre?}
+
+        K[Registrar bateria aprovada]
+        L[Registrar bateria insuficiente]
+        M[Registrar rota aprovada]
+        N[Registrar rota bloqueada]
+
+        JOIN[[JOIN - Sincronizar resultados]]
+
+        O{Bateria e rota aprovadas?}
+        P[Enviar rota ao AGV]
+        S[Bloquear despacho]
+    end
+
+    subgraph AGV["Raia 3 - AGV"]
+        Q[Receber rota]
+        U[Confirmar recebimento]
+        V[Iniciar deslocamento]
+    end
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+
+    E -->|Nao| F
+    F --> Z
+
+    E -->|Sim| FORK
+
+    FORK --> G
+    FORK --> H
+
+    G --> I
+    H --> J
+
+    I -->|Sim| K
+    I -->|Nao| L
+
+    J -->|Sim| M
+    J -->|Nao| N
+
+    K --> JOIN
+    L --> JOIN
+    M --> JOIN
+    N --> JOIN
+
+    JOIN --> O
+
+    O -->|Sim| P
+    P --> Q
+    Q --> U
+    U --> V
+    U --> R
+    R --> Z
+
+    O -->|Nao| S
+    S --> T
+    T --> Z

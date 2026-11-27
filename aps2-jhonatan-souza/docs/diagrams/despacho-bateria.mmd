@@ -1,0 +1,42 @@
+sequenceDiagram
+    autonumber
+    actor Operador
+    participant Orquestrador as Orquestrador de AGVs
+    participant Despacho as Serviço de Despacho
+    participant Monitoramento as Serviço de Monitoramento
+    participant AGV
+
+    Operador->>Orquestrador: solicitarDespacho(entregaId)
+    Orquestrador->>AGV: consultarDisponibilidade(agvId)
+    AGV-->>Orquestrador: StatusDTO
+
+    alt AGV disponível
+
+        par Verificação de bateria
+            Orquestrador->>Monitoramento: verificarBateria(agvId)
+            Monitoramento->>AGV: consultarBateria()
+            AGV-->>Monitoramento: nivelPct
+            Monitoramento-->>Orquestrador: BateriaDTO
+        and Verificação de rota
+            Orquestrador->>Despacho: verificarRota(rotaId)
+            Despacho-->>Orquestrador: RotaDTO
+        end
+
+        alt nivelPct >= 20 e rota livre
+            Orquestrador->>Despacho: despacharRota(agvId, rotaId)
+            Despacho-)AGV: executarRota(RotaDTO)
+            AGV-)Despacho: confirmarRecebimento(rotaId)
+            Despacho-->>Orquestrador: DespachoDTO
+            Orquestrador-->>Operador: Despacho realizado
+
+        else nivelPct < 20
+            Orquestrador-)AGV: solicitarRecarga(agvId)
+            Orquestrador-->>Operador: Despacho bloqueado por bateria insuficiente
+
+        else Rota bloqueada
+            Orquestrador-->>Operador: Despacho bloqueado por rota indisponível
+        end
+
+    else AGV indisponível
+        Orquestrador-->>Operador: Informar indisponibilidade
+    end
