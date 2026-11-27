@@ -806,24 +806,53 @@ Onde aparece: `ReservaAGVService` e `AGVRepository` no C4 nível 3 e nas classes
 
 ## 13. Matriz de rastreabilidade
 
-| Passo / evento | Operação | Sequência | Atividades | Estados | C4 | ADR |
-|---|---|---|---|---|---|---|
-| Telemetria e heartbeat | `onTelemetria`, `verificarHeartbeats` | `loop` inicial e `alt` de detecção | `repeat` na raia Monitoramento | `EmExecucao` | AGVs → Gateway → Broker → Monitoramento | MQTT só na ponta |
-| Interrupção suspeita | `interromperMissao` | `alt novo = true` | 1º Fork, ramo Gestão | `EmExecucao → Interrompida` | Monitoramento → Broker → Redistribuição → API | ack manual |
-| Evento repetido | `registrarSeNovo` | `alt` / `break novo = false` | "evento já registrado?" | sem mudança de estado | Redistribuição → Banco | deduplicação por `eventoId` |
-| Tolerância | `solicitarStatus` | `loop tentativa = 1..3` | 1º Fork, ramo Monitoramento | `do` de `Interrompida` | Monitoramento → Gateway | timeout de 2 s, 3 tentativas |
-| Falha transitória | `retomarMissao` | `break` de falha transitória | "AGV respondeu operacional?" [sim] | `Interrompida → EmExecucao` | Redistribuição → API | |
-| Falha confirmada | `registrarFalha` | após `FalhaConfirmadaEvent` | "Registrar falha da missão original" | **`Interrompida → Falha`** | Redistribuição → API → Banco | lock otimista |
-| Política | `avaliarPolitica` | `break permitida = false` | "redistribuição permitida?" | `exit` de `Falha` | Serviço de Redistribuição | |
-| Missão substituta | `criarMissaoSubstituta`, `buscarSubstitutaDe` | bloco da S-101 | "Criar missão substituta" | `[*] → Criada → AguardandoAtribuicao` | API → Banco | `UNIQUE(missao_origem_id)` |
-| Carga embarcada | `confirmarRecuperacaoCarga`, `onCargaLiberada` | `opt cargaEmbarcada = true` | raia Operador | `BloqueadaPorCarga → ProntaParaDespacho` | Operador → Web → API → Broker | |
-| Seleção | `listarAGVsAptos`, `calcularRota`, `selecionarCandidatos` | `loop` por AGV listado | 2º Fork/Join | `entry` de `ProntaParaDespacho` | Redistribuição → Monitoramento e API | |
-| Reserva concorrente | `reservarAGV`, `reservarSeDisponivel` | `loop` com `opt reservado = false` | "Reservar ... UPDATE condicional" | `AguardandoAtribuicao → Atribuida` | Redistribuição → Banco | reserva por `UPDATE` condicional |
-| Sem candidato | `notificarOperador`, `publicar(missao.reavaliar)` | `break ReservaDTO vazio` | "reserva obtida?" [não] | `ProntaParaDespacho ⇄ SemCandidato` | Redistribuição → Broker | reentrega com atraso |
-| Despacho e erro de comunicação | `atribuirAGV`, `enviarOrdemMissao` | `loop reenvio` | `repeat` de reenvio na raia AGV | `entry` de `Atribuida` | Redistribuição → Gateway → AGVs | MQTT QoS 1 |
-| Aceite | `onAceiteMissao`, `confirmarAceite`, `confirmarReserva` | `alt AGV-12 aceita` | "aceite recebido em até 30 s?" [sim] | `Atribuida → EmExecucao` | AGVs → Gateway → Broker → Redistribuição | `comandoId` |
-| Recusa ou timeout | `liberarAtribuicao`, `liberarReserva` | `else` do aceite | "aceite recebido?" [não] | `Atribuida → AguardandoAtribuicao` | Redistribuição → API | aceite atrasado descartado |
-| Resultado | `registrarAuditoria`, `notificarOperador` | `alt` final | 3º Fork/Join | estado final da S-101 | API → Web (WebSocket) | auditoria |
+| Passo / evento | Operação | Sequência | Atividades | Estados | C4 nível 2 | C4 nível 3 e classes | ADR |
+|---|---|---|---|---|---|---|---|
+| Telemetria e heartbeat | `onTelemetria`, `verificarHeartbeats` | `loop` inicial e `alt` de detecção | `repeat` na raia Monitoramento | `EmExecucao` | AGVs → Gateway → Broker → Monitoramento | `MonitoramentoAGVService` | 0001: MQTT só na ponta |
+| Interrupção suspeita | `onInterrupcaoSuspeita`, `interromperMissao` | `alt processado = false` | 1º Fork, ramo Gestão | `EmExecucao → Interrompida` | Monitoramento → Broker → Redistribuição → API | `ConsumidorEventos` → `RedistribuicaoService` → `MissaoService`; `MissaoTransporte.interromper()` | 0001: ack manual |
+| Evento repetido | `jaProcessado`, `marcarProcessado` | `alt` / `break processado = true` | "evento já processado?" | guarda `[evento não processado]` | Redistribuição → Banco | `ConsumidorEventos`, `EventoRepository`, `EventoMissao.eventoId` | 0001 item 1; 0002, relação com a idempotência |
+| Tolerância | `solicitarStatus` | `loop tentativa = 1..3` | 1º Fork, ramo Monitoramento | `do` de `Interrompida` | Monitoramento → Gateway | `AGVGateway` | 0001: timeout de 2 s, 3 tentativas |
+| Falha transitória | `onAgvRecuperado`, `retomarMissao` | `break` de falha transitória | "AGV respondeu operacional?" [sim] | `Interrompida → EmExecucao` (`agvRecuperado`) | Monitoramento → Broker → Redistribuição → API | `RedistribuicaoService`, `AgvRecuperadoEvent`, `MissaoTransporte.retomar()` | |
+| Falha confirmada | `onFalhaConfirmada`, `registrarFalha` | após `FalhaConfirmadaEvent` | "Registrar falha da missão original" | **`Interrompida → Falha`** | Redistribuição → API → Banco | `RedistribuicaoService`, `MissaoTransporte.registrarFalha()`, `MissaoRepository.salvar()` | 0001: lock otimista |
+| Política | `avaliarPolitica` | `break permitida = false` | "redistribuição permitida?" | nota de `Falha` | Serviço de Redistribuição | `PoliticaRedistribuicao`, `DecisaoRedistribuicaoDTO` | |
+| Missão substituta | `criarMissaoSubstituta`, `buscarSubstitutaDe` | bloco da S-101 | "Criar missão substituta" | `[*] → Criada → AguardandoAtribuicao` | Redistribuição → API → Banco | `RegraContinuidade`, `MissaoServiceImpl`, associação origem/substituta `0..1` | 0001: `UNIQUE(missao_origem_id)` |
+| Carga embarcada | `confirmarRecuperacaoCarga`, `onCargaLiberada` | `opt cargaLiberada = false` | raia Operador | `[cargaLiberada = false]`, `BloqueadaPorCarga → ProntaParaDespacho` | Operador → Web → API → Broker → Redistribuição | `ControleContinuidade`, `MissaoTransporte.liberarCarga()` | |
+| Seleção | `listarAGVsAptos`, `calcularRota`, `selecionarCandidatos` | `loop` por AGV restante | 2º Fork/Join, um ramo por candidato | `entry` de `ProntaParaDespacho` | Redistribuição → Monitoramento e API | `SelecaoAGVService` → Clientes REST | |
+| Reserva concorrente | `reservarAGV`, `reservarSeDisponivel` | `loop` com `opt reservado = false` | "Reservar ... UPDATE condicional" | `AguardandoAtribuicao → Atribuida` `[em ProntaParaDespacho ...]` | Redistribuição → Banco | `ReservaAGVService`, `AGVRepository`, `ReservaAGV` | 0002 |
+| Sem candidato | `notificarOperador`, `publicar(missao.reavaliar)`, `onReavaliar` | `break ReservaDTO vazio` | "reserva obtida?" [não] | `ProntaParaDespacho ⇄ SemCandidato` | Redistribuição → Broker | `ControleContinuidade`, `PublicadorEventos` | 0001: reentrega com atraso |
+| Despacho e erro de comunicação | `atribuirAGV`, `enviarOrdemMissao` | `loop reenvio` | `repeat` de reenvio na raia AGV | `entry` de `Atribuida` | Redistribuição → Gateway → AGVs | `ControleContinuidade`, `AGVGateway`, `MissaoTransporte.atribuir()` gera `comandoIdAtivo` | 0001: MQTT QoS 1 |
+| Aceite | `onAceiteMissao`, `confirmarReserva`, `confirmarSeAtiva`, `confirmarAceite` | `alt AGV-12 aceita` | "aceite recebido em até 30 s?" [sim] | `Atribuida → EmExecucao` `[comandoId válido e confirmarSeAtiva() = true]` | AGVs → Gateway → Broker → Redistribuição → API | `ControleContinuidade`, `ReservaAGVService`, `AGVRepository` | 0002: reserva confirmada antes do aceite |
+| Recusa ou timeout | `liberarAtribuicao`, `liberarReserva` | `else` do aceite | "aceite recebido?" [não] | `Atribuida → AguardandoAtribuicao` | Redistribuição → API e Banco | `ControleContinuidade`, `MissaoTransporte.liberarAtribuicao()` | 0001: aceite atrasado descartado |
+| Reserva vencida | `liberarReservasVencidas`, `liberarVencidas` | não aparece (caso de queda do serviço) | não aparece | volta por `reavaliar` | Redistribuição → Banco e Broker | `ReservaAGVService` → `PublicadorEventos` | 0002 |
+| Resultado | `registrarAuditoria`, `notificarOperador` | `alt` final | 3º Fork/Join | estado final da S-101 | Redistribuição → API → Web (WebSocket) | `EventoRepository`, `NotificacaoService` | auditoria |
+
+### Verificação de consistência
+
+O que conferi entre os modelos e o que precisou mudar:
+
+| Verificação | Resultado |
+|---|---|
+| Toda mensagem da sequência existe numa classe, interface ou contrato | Sim, tabela da seção 11. Corrigido: `avaliarPolitica` era uma chamada do `RedistribuicaoService` para ele mesmo e agora é da `PoliticaRedistribuicao`. A reserva saiu do `SelecaoAGVService` e foi para o `ReservaAGVService`. `retomarMissao` não tinha quem chamasse e ganhou o evento `agv.recuperado`. `missao.reavaliar` era publicado, mas ninguém tinha a operação para consumir, e agora existe `onReavaliar`. |
+| Participantes da sequência e componentes do C4 nível 3 | Mesmos nomes. Os contêineres que aparecem no nível 3 têm o mesmo nome e tecnologia do nível 2. |
+| Pacotes do diagrama de classes e contêineres do C4 | Um pacote por contêiner, com os mesmos nomes. |
+| Transições de estado e gatilhos | Cada transição tem a operação correspondente na sequência e a ação no diagrama de atividades (coluna Estados da matriz). Corrigido: `exit` de `Falha`, guarda do bloqueio por carga e atribuição a partir de `BloqueadaPorCarga`. |
+| `Falha` como estado final da original | Sem transição de saída na máquina de estados, sem método de saída na `MissaoTransporte`, e a substituta é sempre outra instância (`RegraContinuidade`). |
+| Paralelismo no diagrama de atividades | Corrigido o 2º Fork, que punha a bateria em paralelo com a rota de que ela depende. |
+| Regras de negócio com os mesmos valores | 6 s sem heartbeat, 3 tentativas de 2 s, bateria com 20% de margem, reserva e aceite de 30 s, reavaliação em 60 s, 3 tentativas de despacho e menos de 3 redistribuições aparecem iguais nos diagramas, no README e nas ADRs. |
+| Decisões das ADRs na arquitetura | ADR 0001: Broker, ack manual e `ConsumidorEventos`. ADR 0002: `ReservaAGVService`, `AGVRepository`, índices únicos e a confirmação antes do aceite. |
+
+**Divergências com os dossiês dos colegas** (branches `alyson`, `fabio`, `jhonatan` e `laura`, sem alteração nos arquivos deles):
+
+| Ponto | Meu modelo | Colegas |
+|---|---|---|
+| Nome da entidade do veículo | `AGV` | `VeiculoAGV` (Alyson) |
+| Estados do AGV | `DISPONIVEL`, `RESERVADO`, `EM_MISSAO`, `EM_FALHA`, `MANUTENCAO` | `CARREGANDO_BATERIA` (Alyson); `Disponivel`, `EmTransito`, `EmCarregamento`, `EmFalhaOperacional` (Jhonatan) |
+| Contêiner das missões | API de Gestão de Missões, Java 21 e Spring Boot | API de Orquestração de Missões (Laura em Java, Alyson em Node.js/NestJS); Serviço de Missões (Fabio) |
+| Mensageria e gateway | RabbitMQ; Gateway em Node.js com MQTT | Kafka (Fabio); gateway em Go com gRPC (Alyson e Fabio) |
+| Estados da missão | `Criada`, `AguardandoAtribuicao`... | `PLANEJADA`, `AGUARDANDO_ALOCACAO` (Laura) |
+| Falha da missão vista pela solicitação | A entrega continua na substituta com `missaoOrigemId` | `missaoFalhou` volta a solicitação para `PRIORIZADA` e cria outra missão (Laura) |
+
+Não mudei meus nomes para seguir um colega, porque ainda não existe um modelo comum da equipe. Esses pontos ficaram como sugestão para a revisão dos PRs.
 
 ## 14. Como visualizar e validar
 
