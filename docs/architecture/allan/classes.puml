@@ -194,6 +194,7 @@ package "API de Gestão de Missões" {
     + confirmarAceite(comandoId: UUID): void
     + liberarAtribuicao(motivo: String): void
     + liberarCarga(confirmacao: ConfirmacaoCargaDTO): void
+    + cancelar(motivo: String): void
     + estaEncerrada(): boolean
   }
 
