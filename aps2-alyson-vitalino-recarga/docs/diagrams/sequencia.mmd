@@ -1,0 +1,149 @@
+sequenceDiagram
+    %% =====================================================================
+    %% Artefato 1 — Diagrama de Sequência
+    %% Funcionalidade: Recarga Programada e Balanceamento de Frota
+    %% Contexto núcleo: Orquestração de Missões
+    %% Políticas aplicadas: Recarregamento e Balanceamento de Frota
+    %%
+    %% Convenção de setas:
+    %%   ->>   chamada síncrona bloqueante (gRPC unário / SQL / chamada local)
+    %%   -)    mensagem assíncrona (BullMQ / AMQP / OPC UA subscription), sem espera
+    %%   -->>  retorno de dados (DTO)
+    %%
+    %% Limiares (coerentes com o dossiê de Despacho):
+    %%   nivelPct < 20            -> recarga OBRIGATORIA
+    %%   20 <= nivelPct < 50      -> recarga de OPORTUNIDADE (se a frota permitir)
+    %%   nivelPct >= 90           -> carga completa, AGV liberado
+    %%   nivelPct >= 60 + demanda -> liberação ANTECIPADA (balanceamento)
+    %%
+    %% Regra de consistência — operações públicas de cada linha de vida
+    %% (toda mensagem recebida abaixo corresponde a uma destas operações):
+    %%
+    %%   PlanejadorRecargaService
+    %%     + iniciarCicloPlanejamento(cicloId): void
+    %%   FrotaRepository
+    %%     + listarAGVsOperacionais(): AGVStatusDTO[]
+    %%     + atualizarEstado(agvId, estado: EstadoAGV): void
+    %%   TelemetriaService
+    %%     + obterUltimasLeituras(agvIds[]): LeituraBateriaDTO[]
+    %%     + registrarLeituraCarga(l: LeituraCargaDTO): void
+    %%   BalanceadorFrotaService
+    %%     + calcularCapacidadeFrota(frota: AGVStatusDTO[]): CapacidadeFrotaDTO
+    %%     + avaliarLiberacao(agvId, nivelPct): DecisaoLiberacaoDTO
+    %%   MissaoRepository
+    %%     + contarPendentes(janelaMin): DemandaDTO
+    %%   PoliticaRecarregamento (Strategy)
+    %%     + priorizarCandidatos(leituras: LeituraBateriaDTO[], cap: CapacidadeFrotaDTO): CandidatoRecargaDTO[]
+    %%   GeolocalizacaoService
+    %%     + localizarEstacoesProximas(agvId): EstacaoCandidataDTO[]
+    %%   EstacaoRecargaService
+    %%     + reservarSlot(req: ReservaSlotRequestDTO): SlotRecargaDTO
+    %%     + notificarAcoplamento(slotId, agvId): void
+    %%     + receberLeituraCarga(l: LeituraCargaDTO): void
+    %%   AGVGateway (adaptador gRPC)
+    %%     + enviarParaRecarga(agvId, estacaoId): AckComandoDTO
+    %%   AGVFirmware (hardware embarcado)
+    %%     + irParaEstacao(estacaoId): AckComandoDTO
+    %%   ControladorEstacao (hardware, OPC UA)
+    %%     + iniciarCarga(p: PerfilCargaDTO): AckCargaDTO
+    %%     + pararCarga(slotId): AckCargaDTO
+    %%   EventBus (RabbitMQ)
+    %%     + publicar(evento: DomainEvent): void
+    %% =====================================================================
+
+    autonumber
+
+    participant JOB as AgendadorJobs<br/>(BullMQ, a cada 60 s)
+    participant PLAN as PlanejadorRecargaService
+    participant FREPO as FrotaRepository
+    participant TEL as TelemetriaService
+    participant BAL as BalanceadorFrotaService
+    participant MREPO as MissaoRepository
+    participant POL as PoliticaRecarregamento<br/>(Strategy)
+    participant GEO as GeolocalizacaoService
+    participant EST as EstacaoRecargaService
+    participant GW as AGVGateway<br/>(gRPC)
+    participant AGV as AGVFirmware<br/>(hardware)
+    participant CTRL as ControladorEstacao<br/>(OPC UA)
+    participant BUS as EventBus<br/>(RabbitMQ)
+
+    %% ---------- Fase 1: diagnóstico da frota ----------
+    JOB-)PLAN: iniciarCicloPlanejamento(cicloId)
+    activate PLAN
+
+    PLAN->>FREPO: listarAGVsOperacionais()
+    FREPO-->>PLAN: AGVStatusDTO[]{agvId, estado, ocioso, missaoAtualId}
+
+    PLAN->>TEL: obterUltimasLeituras(agvIds[])
+    TEL-->>PLAN: LeituraBateriaDTO[]{agvId, nivelPct, autonomiaWh, saudePct, ts}
+
+    PLAN->>BAL: calcularCapacidadeFrota(AGVStatusDTO[])
+    activate BAL
+    BAL->>MREPO: contarPendentes(janelaMin=30)
+    MREPO-->>BAL: DemandaDTO{missoesPendentes, missoesCriticas}
+    BAL-->>PLAN: CapacidadeFrotaDTO{disponiveis, emRecarga, minimoOperacional, vagasRecarga}
+    deactivate BAL
+
+    PLAN->>POL: priorizarCandidatos(LeituraBateriaDTO[], CapacidadeFrotaDTO)
+    POL-->>PLAN: CandidatoRecargaDTO[]{agvId, nivelPct, urgencia=OBRIGATORIA|OPORTUNIDADE, score}
+
+    %% ---------- Fase 2: programação das recargas ----------
+    loop [para cada candidato, em ordem de score, enquanto capacidade.vagasRecarga > 0]
+
+        alt [candidato.urgencia == OBRIGATORIA OR capacidade.disponiveis - 1 >= capacidade.minimoOperacional]
+            PLAN->>GEO: localizarEstacoesProximas(agvId)
+            GEO-->>PLAN: EstacaoCandidataDTO[]{estacaoId, distanciaM, etaS}
+
+            PLAN->>EST: reservarSlot(ReservaSlotRequestDTO{agvId, estacoes[], janelaInicio})
+            EST-->>PLAN: SlotRecargaDTO{slotId, estacaoId, reservado, inicioPrevisto}
+
+            alt [slot.reservado == true]
+                PLAN->>GW: enviarParaRecarga(agvId, estacaoId)
+                activate GW
+                GW->>AGV: irParaEstacao(estacaoId)
+                AGV-->>GW: AckComandoDTO{aceito=true, timestamp}
+                GW-->>PLAN: AckComandoDTO{aceito=true, timestamp}
+                deactivate GW
+                PLAN->>FREPO: atualizarEstado(agvId, CARREGANDO_BATERIA)
+                PLAN-)BUS: publicar(RecargaProgramadaEvent{agvId, slotId, urgencia})
+                Note over PLAN: capacidade.disponiveis -= 1<br/>capacidade.vagasRecarga -= 1
+            else [slot.reservado == false]
+                PLAN-)BUS: publicar(RecargaAdiadaEvent{agvId, motivo=SEM_SLOT_DISPONIVEL})
+            end
+
+        else [candidato.urgencia == OPORTUNIDADE AND capacidade.disponiveis - 1 < capacidade.minimoOperacional]
+            Note over PLAN,BAL: Balanceamento: retirar este AGV deixaria a frota abaixo do mínimo
+            PLAN-)BUS: publicar(RecargaAdiadaEvent{agvId, motivo=BALANCEAMENTO_FROTA})
+        end
+    end
+
+    PLAN-)BUS: publicar(CicloRecargaConcluidoEvent{cicloId, programadas, adiadas})
+    deactivate PLAN
+
+    %% ---------- Fase 3: execução da carga na estação ----------
+    Note over AGV,CTRL: AGV se desloca e acopla na estação reservada
+    CTRL-)EST: notificarAcoplamento(slotId, agvId)
+    activate EST
+    EST->>CTRL: iniciarCarga(PerfilCargaDTO{slotId, correnteMaxA, alvoPct=90})
+    CTRL-->>EST: AckCargaDTO{iniciada=true, timestamp}
+    deactivate EST
+
+    loop [a cada 5 s, enquanto a sessão de carga estiver ativa]
+        CTRL-)EST: receberLeituraCarga(LeituraCargaDTO{slotId, agvId, nivelPct, correnteA, temperaturaC})
+        activate EST
+        EST-)TEL: registrarLeituraCarga(LeituraCargaDTO)
+        EST->>BAL: avaliarLiberacao(agvId, nivelPct)
+        BAL-->>EST: DecisaoLiberacaoDTO{liberar, tipo=COMPLETA|ANTECIPADA|NENHUMA}
+
+        alt [decisao.liberar == true]
+            Note over EST,BAL: COMPLETA: nivelPct >= 90<br/>ANTECIPADA: nivelPct >= 60 AND missoesCriticas > 0
+            EST->>CTRL: pararCarga(slotId)
+            CTRL-->>EST: AckCargaDTO{encerrada=true, energiaWh}
+            EST->>FREPO: atualizarEstado(agvId, DISPONIVEL)
+            EST-)BUS: publicar(RecargaConcluidaEvent{agvId, tipo, nivelPct, energiaWh})
+            EST-)BUS: publicar(AGVDisponibilizadoEvent{agvId, nivelPct})
+        else [decisao.liberar == false]
+            Note over EST: Carga continua na próxima leitura
+        end
+        deactivate EST
+    end
