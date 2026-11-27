@@ -1,0 +1,297 @@
+' Classes e interfaces da redistribuicao de missao por falha de AGV
+@startuml
+!pragma layout smetana
+skinparam defaultFontSize 12
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+hide empty members
+
+title Redistribuição de missão por falha de AGV - Classes e interfaces
+
+package "Serviço de Redistribuição" {
+  class ConsumidorEventos {
+    + receber(evento: EventoMissao): void
+  }
+
+  class RedistribuicaoService {
+    + onInterrupcaoSuspeita(evento: InterrupcaoSuspeitaEvent): void
+    + onAgvRecuperado(evento: AgvRecuperadoEvent): void
+    + onFalhaConfirmada(evento: FalhaConfirmadaEvent): void
+  }
+
+  class PoliticaRedistribuicao {
+    - limiteRedistribuicoes: int = 3
+    + avaliarPolitica(missao: MissaoDTO): DecisaoRedistribuicaoDTO
+  }
+
+  class DecisaoRedistribuicaoDTO {
+    + permitida: boolean
+    + motivo: String
+  }
+
+  class ControleContinuidade {
+    - maxTentativasDespacho: int = 3
+    - timeoutAceite: Duration = 30 s
+    - atrasoReavaliacao: Duration = 60 s
+    + continuarEntrega(substituta: MissaoDTO): void
+    + onCargaLiberada(evento: CargaLiberadaEvent): void
+    + onAceiteMissao(aceite: AceiteMissaoDTO): void
+    + onReavaliar(evento: ReavaliarMissaoEvent): void
+    - tentarDespacho(substituta: MissaoDTO): boolean
+    - agendarReavaliacao(missaoId: String): void
+  }
+
+  class SelecaoAGVService {
+    - margemBateria: double = 0.20
+    + selecionarCandidatos(criterio: CriterioSelecaoDTO): List<CandidatoDTO>
+    - temCapacidade(agv: AGVStatusDTO, pesoKg: double): boolean
+    - bateriaSuficiente(agv: AGVStatusDTO, rota: RotaDTO): boolean
+  }
+
+  class ReservaAGVService {
+    - ttlReserva: Duration = 30 s
+    + reservarAGV(candidatos: List<CandidatoDTO>, missaoId: String): Optional<ReservaDTO>
+    + confirmarReserva(reservaId: UUID): ReservaDTO
+    + liberarReserva(reservaId: UUID): void
+    + liberarReservasVencidas(): void
+  }
+
+  interface PublicadorEventos {
+    + publicar(topico: String, evento: EventoMissao): void
+    + publicar(topico: String, evento: EventoMissao, atraso: Duration): void
+  }
+
+  interface AGVRepository {
+    + reservarSeDisponivel(reservaId: UUID, agvId: String, missaoId: String, ttl: Duration): boolean
+    + confirmarSeAtiva(reservaId: UUID): boolean
+    + liberar(reservaId: UUID): void
+    + liberarVencidas(agora: Instant): List<ReservaAGV>
+    + buscarReservaAtiva(missaoId: String): Optional<ReservaAGV>
+  }
+
+  interface EventoRepository {
+    + jaProcessado(eventoId: UUID): boolean
+    + marcarProcessado(eventoId: UUID): void
+    + registrarAuditoria(auditoria: AuditoriaDTO): void
+  }
+
+  class AGV {
+    - id: String
+    - estado: EstadoAGV
+    - posicao: Posicao
+    - bateriaPct: int
+    - capacidadeKg: double
+    - ultimoHeartbeat: Instant
+    + estaDisponivel(): boolean
+  }
+
+  class ReservaAGV {
+    - id: UUID
+    - agvId: String
+    - missaoId: String
+    - status: StatusReserva
+    - expiraEm: Instant
+    + estaVencida(agora: Instant): boolean
+  }
+
+  enum EstadoAGV {
+    DISPONIVEL
+    RESERVADO
+    EM_MISSAO
+    EM_FALHA
+    MANUTENCAO
+  }
+
+  enum StatusReserva {
+    ATIVA
+    CONFIRMADA
+    LIBERADA
+  }
+}
+
+package "Eventos (RabbitMQ)" {
+  abstract class EventoMissao {
+    + eventoId: UUID
+    + missaoId: String
+  }
+  class InterrupcaoSuspeitaEvent {
+    + agvId: String
+    + motivo: String
+    + detectadoEm: Instant
+  }
+  class AgvRecuperadoEvent {
+    + agvId: String
+    + respondidoEm: Instant
+  }
+  class FalhaConfirmadaEvent {
+    + agvId: String
+    + codigoFalha: String [0..1]
+    + tentativasContato: int
+  }
+  class CargaLiberadaEvent {
+    + operadorId: String
+  }
+  class AceiteMissaoDTO {
+    + comandoId: UUID
+    + agvId: String
+    + aceito: boolean
+    + respondidoEm: Instant
+  }
+  class ReavaliarMissaoEvent {
+    + agendadoPara: Instant
+  }
+}
+
+package "API de Gestão de Missões" {
+  interface MissaoService {
+    + interromperMissao(missaoId: String, motivo: MotivoInterrupcaoDTO): MissaoDTO
+    + retomarMissao(missaoId: String): MissaoDTO
+    + registrarFalha(missaoId: String, falha: FalhaDTO): MissaoDTO
+    + criarMissaoSubstituta(missaoOrigemId: String): MissaoDTO
+    + confirmarRecuperacaoCarga(missaoId: String, confirmacao: ConfirmacaoCargaDTO): MissaoDTO
+    + atribuirAGV(missaoId: String, agvId: String, reservaId: UUID): MissaoDTO
+    + confirmarAceite(missaoId: String, aceite: AceiteMissaoDTO): MissaoDTO
+    + liberarAtribuicao(missaoId: String, motivo: String): MissaoDTO
+  }
+
+  interface RotaService {
+    + calcularRota(origem: Posicao, pontoColeta: Posicao, destino: Posicao): RotaDTO
+  }
+
+  interface NotificacaoService {
+    + notificarOperador(notificacao: NotificacaoDTO): void
+  }
+
+  class MissaoServiceImpl
+
+  class RegraContinuidade {
+    + criarSubstituta(original: MissaoTransporte, novoId: String): MissaoTransporte
+  }
+
+  interface MissaoRepository {
+    + salvar(missao: MissaoTransporte, versaoEsperada: long): MissaoTransporte
+    + buscarSubstitutaDe(missaoOrigemId: String): Optional<MissaoTransporte>
+  }
+
+  class MissaoTransporte {
+    - id: String
+    - estado: EstadoMissao
+    - agvId: String [0..1]
+    - pontoColeta: Posicao
+    - destino: Posicao
+    - pesoKg: double
+    - prazo: Instant
+    - cargaEmbarcada: boolean
+    - cargaLiberada: boolean
+    - missaoOrigemId: String [0..1]
+    - redistribuicoes: int
+    - comandoIdAtivo: UUID [0..1]
+    - versao: long
+    + interromper(motivo: MotivoInterrupcaoDTO): void
+    + retomar(): void
+    + registrarFalha(falha: FalhaDTO): void
+    + atribuir(agvId: String, reservaId: UUID): UUID
+    + confirmarAceite(comandoId: UUID): void
+    + liberarAtribuicao(motivo: String): void
+    + liberarCarga(confirmacao: ConfirmacaoCargaDTO): void
+    + cancelar(motivo: String): void
+    + estaEncerrada(): boolean
+  }
+
+  enum EstadoMissao {
+    Criada
+    AguardandoAtribuicao
+    Atribuida
+    EmExecucao
+    Interrompida
+    Falha
+    Concluida
+    Cancelada
+  }
+}
+
+package "Serviço de Monitoramento de AGVs" {
+  interface MonitoramentoAGVService {
+    + onTelemetria(telemetria: TelemetriaDTO): void
+    + verificarHeartbeats(): void
+    + listarAGVsAptos(filtro: FiltroAGVDTO): List<AGVStatusDTO>
+  }
+}
+
+package "Gateway de Comunicação" {
+  interface AGVGateway {
+    + solicitarStatus(agvId: String, timeout: Duration): StatusAGVDTO
+    + enviarOrdemMissao(ordem: OrdemMissaoDTO): EnvioDTO
+  }
+}
+
+' Recebimento e processamento
+ConsumidorEventos ..> EventoMissao : recebe
+ConsumidorEventos --> EventoRepository
+ConsumidorEventos --> RedistribuicaoService
+ConsumidorEventos --> ControleContinuidade
+
+RedistribuicaoService --> PoliticaRedistribuicao
+PoliticaRedistribuicao ..> DecisaoRedistribuicaoDTO : cria
+RedistribuicaoService --> ControleContinuidade
+RedistribuicaoService --> EventoRepository
+RedistribuicaoService ..> MissaoService
+RedistribuicaoService ..> NotificacaoService
+
+ControleContinuidade --> SelecaoAGVService
+ControleContinuidade --> ReservaAGVService
+ControleContinuidade --> PublicadorEventos
+ControleContinuidade --> EventoRepository
+ControleContinuidade ..> MissaoService
+ControleContinuidade ..> NotificacaoService
+ControleContinuidade ..> AGVGateway
+
+SelecaoAGVService ..> MonitoramentoAGVService
+SelecaoAGVService ..> RotaService
+
+ReservaAGVService --> AGVRepository
+ReservaAGVService --> PublicadorEventos
+AGVRepository ..> ReservaAGV
+AGVRepository ..> AGV
+
+' Eventos
+EventoMissao <|-- InterrupcaoSuspeitaEvent
+EventoMissao <|-- AgvRecuperadoEvent
+EventoMissao <|-- FalhaConfirmadaEvent
+EventoMissao <|-- CargaLiberadaEvent
+EventoMissao <|-- AceiteMissaoDTO
+EventoMissao <|-- ReavaliarMissaoEvent
+
+' Entidades
+AGV "1" <-- "0..*" ReservaAGV : agvId
+MissaoTransporte "1" <-- "0..*" ReservaAGV : missaoId
+MissaoTransporte "0..*" --> "0..1" AGV : agvId
+MissaoTransporte "0..1 origem" -- "0..1 substituta" MissaoTransporte : missaoOrigemId
+AGV ..> EstadoAGV
+ReservaAGV ..> StatusReserva
+MissaoTransporte ..> EstadoMissao
+
+' API de Gestao de Missoes
+MissaoServiceImpl ..|> MissaoService
+MissaoServiceImpl --> RegraContinuidade
+MissaoServiceImpl --> MissaoRepository
+RegraContinuidade ..> MissaoTransporte : cria a substituta
+MissaoRepository ..> MissaoTransporte
+
+note bottom of ReservaAGV
+  No máximo uma reserva ATIVA ou CONFIRMADA
+  por AGV e por missão (índice único parcial).
+end note
+
+note bottom of RegraContinuidade
+  Só aceita original em Falha. A substituta recebe id próprio,
+  missaoOrigemId = original.id, redistribuicoes + 1 e
+  cargaLiberada = false se a carga estava no AGV que falhou.
+end note
+
+note top of MissaoService
+  As interfaces dos outros serviços são implementadas
+  no Serviço de Redistribuição pelos Clientes REST
+  (C4 nível 3). Os repositórios usam Spring JDBC.
+end note
+@enduml
