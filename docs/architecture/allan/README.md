@@ -52,19 +52,21 @@ A entidade principal é a `MissaoTransporte`. A transição crítica é **`Inter
 **Estrutura do repositório**
 
 ```text
-aps2-allan-camargo/
-├── docs/
-│   ├── architecture/
-│   │   ├── adr-0001.md        ADR da mensageria
-│   │   ├── container.puml     C4 nível 2 (fonte)
-│   │   └── container.svg      C4 nível 2 (gerado)
-│   └── diagrams/
-│       ├── sequencia.mmd      sequência (Mermaid)
-│       ├── atividades.puml    atividades com raias (fonte)
-│       ├── atividades.svg     atividades com raias (gerado)
-│       └── estados.mmd        estados da MissaoTransporte (Mermaid)
-└── README.md
+docs/
+├── adr/
+│   └── 0001-redistribuicao-mensageria-rabbitmq.md   ADR da mensageria
+└── architecture/
+    └── allan/
+        ├── README.md            este documento
+        ├── sequencia.mmd        sequência (Mermaid)
+        ├── atividades.puml      atividades com raias (fonte)
+        ├── atividades.svg       atividades com raias (gerado)
+        ├── estados.mmd          estados da MissaoTransporte (Mermaid)
+        ├── c4-containers.puml   C4 nível 2 (fonte)
+        └── c4-containers.svg    C4 nível 2 (gerado)
 ```
+
+Os diagramas ficam em `docs/architecture/allan/` e as ADRs em `docs/adr/`, como o professor pediu para a avaliação final.
 
 **Escolha das ferramentas**
 
@@ -296,7 +298,7 @@ O broker só tem duas operações nos diagramas: `publicar(topico, evento [, atr
 
 ## 6. Diagrama de sequência
 
-Fonte: [docs/diagrams/sequencia.mmd](docs/diagrams/sequencia.mmd)
+Fonte: [sequencia.mmd](sequencia.mmd)
 
 O exemplo usado é a missão M-100, que estava com o AGV-07. Ele falha e a entrega passa para o AGV-12 através da substituta S-101. As caixas agrupam os serviços pelo contêiner onde rodam, o mesmo agrupamento da visão C4.
 
@@ -499,9 +501,9 @@ sequenceDiagram
 
 ## 7. Diagrama de atividades
 
-Fonte: [docs/diagrams/atividades.puml](docs/diagrams/atividades.puml) · imagem gerada: [docs/diagrams/atividades.svg](docs/diagrams/atividades.svg)
+Fonte: [atividades.puml](atividades.puml) · imagem gerada: [atividades.svg](atividades.svg)
 
-![Diagrama de atividades da redistribuição](docs/diagrams/atividades.svg)
+![Diagrama de atividades da redistribuição](atividades.svg)
 
 O diagrama tem quatro raias: AGV / Comunicação, Monitoramento e Detecção, Gestão de Missões e Operador. Separei o Operador numa raia própria porque ele participa de verdade do fluxo: é quem libera a carga embarcada.
 
@@ -515,7 +517,7 @@ As decisões têm guardas `[sim]`/`[não]` sobre uma mesma condição, então s�
 
 ## 8. Diagrama de estados
 
-Fonte: [docs/diagrams/estados.mmd](docs/diagrams/estados.mmd)
+Fonte: [estados.mmd](estados.mmd)
 
 ```mermaid
 stateDiagram-v2
@@ -607,9 +609,9 @@ O Mermaid não aceita `entry`/`do`/`exit` em estado composto. Por isso as açõe
 
 ## 9. Visão C4 de contêineres
 
-Fonte: [docs/architecture/container.puml](docs/architecture/container.puml) · imagem gerada: [docs/architecture/container.svg](docs/architecture/container.svg)
+Fonte: [c4-containers.puml](c4-containers.puml) · imagem gerada: [c4-containers.svg](c4-containers.svg)
 
-![Visão C4 de contêineres](docs/architecture/container.svg)
+![Visão C4 de contêineres](c4-containers.svg)
 
 | Contêiner | Tecnologia | Responsabilidade |
 |---|---|---|
@@ -632,7 +634,7 @@ Protocolos: HTTPS/REST entre a Web e a API e entre os serviços; WebSocket para 
 
 ## 10. ADR 0001
 
-Documento completo: [docs/architecture/adr-0001.md](docs/architecture/adr-0001.md)
+Documento completo: [docs/adr/0001-redistribuicao-mensageria-rabbitmq.md](../../adr/0001-redistribuicao-mensageria-rabbitmq.md)
 
 **Decisão:** usar RabbitMQ (AMQP) entre os serviços e MQTT/TLS só entre os AGVs e o Gateway, com filas duráveis e ack manual depois da gravação no banco.
 
@@ -671,12 +673,12 @@ As principais consequências são a consistência eventual no painel, o RabbitMQ
 
 ```bash
 # Mermaid (sequência e estados)
-npx -y @mermaid-js/mermaid-cli@11.4.2 -i docs/diagrams/sequencia.mmd -o /tmp/sequencia.svg
-npx -y @mermaid-js/mermaid-cli@11.4.2 -i docs/diagrams/estados.mmd -o /tmp/estados.svg
+npx -y @mermaid-js/mermaid-cli@11.4.2 -i docs/architecture/allan/sequencia.mmd -o /tmp/sequencia.svg
+npx -y @mermaid-js/mermaid-cli@11.4.2 -i docs/architecture/allan/estados.mmd -o /tmp/estados.svg
 
 # PlantUML (atividades e C4). Gera os .svg ao lado dos fontes
 curl -sSL -o plantuml.jar https://github.com/plantuml/plantuml/releases/download/v1.2024.7/plantuml-1.2024.7.jar
-java -jar plantuml.jar -tsvg -failfast2 docs/diagrams/atividades.puml docs/architecture/container.puml
+java -jar plantuml.jar -tsvg -failfast2 docs/architecture/allan/atividades.puml docs/architecture/allan/c4-containers.puml
 ```
 
 Os comandos terminam com código diferente de zero se houver erro de sintaxe. Não é preciso ter Graphviz, porque os `.puml` usam o layout `smetana`.
